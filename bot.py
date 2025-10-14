@@ -88,14 +88,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # 如果跳过检测，直接返回
         if detection_result["skip_reason"]:
-            logger.debug(f"跳过消息 - 原因: {detection_result['skip_reason']}")
+            user = message.from_user
+            logger.info(f"跳过消息 - 原因: {detection_result['skip_reason']} | 用户: {user.username or user.first_name} (ID: {user.id})")
+            print(f"⏭️  跳过检测 | 用户: {user.username or user.first_name} | 原因: {detection_result['skip_reason']}")
             return
+        
+        # 打印所有消息的检测结果和置信度
+        user = message.from_user
+        result = detection_result["result"]
+        
+        # 在控制台打印每条消息的置信度
+        print(f"\n{'='*80}")
+        print(f"📨 新消息检测")
+        print(f"👤 用户: {user.username or user.first_name} (ID: {user.id})")
+        print(f"💬 内容: {message.text[:100] if message.text else '[非文本消息]'}{'...' if message.text and len(message.text) > 100 else ''}")
+        print(f"🎯 垃圾消息判定: {'是 ❌' if result['is_spam'] else '否 ✅'}")
+        print(f"📊 置信度: {result['confidence']:.2%} ({result['confidence']:.4f})")
+        print(f"📋 类型: {result.get('category', '未知')}")
+        print(f"💡 理由: {result['reason']}")
+        print(f"🔧 处理: {'删除+封禁' if detection_result['should_delete'] else '保留'}")
+        print(f"{'='*80}\n")
         
         # 如果需要删除消息和封禁用户
         if detection_result["should_delete"] and detection_result["should_ban"]:
-            user = message.from_user
-            result = detection_result["result"]
-            
             logger.warning(
                 f"检测到垃圾消息 - 用户: {user.username or user.first_name} (ID: {user.id}), "
                 f"置信度: {result['confidence']:.2f}, "
@@ -150,13 +165,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     logger.warning("消息已被删除或不存在")
         
         else:
-            # 正常消息，记录日志（可选）
-            if detection_result["result"]:
-                result = detection_result["result"]
-                logger.debug(
-                    f"正常消息 - 用户: {message.from_user.username or message.from_user.first_name}, "
-                    f"置信度: {result['confidence']:.2f}"
-                )
+            # 正常消息，记录日志
+            logger.info(
+                f"✅ 正常消息 - 用户: {user.username or user.first_name} (ID: {user.id}), "
+                f"置信度: {result['confidence']:.2f} (低于阈值 {config.CONFIDENCE_THRESHOLD})"
+            )
     
     except Exception as e:
         logger.error(f"处理消息时发生未预期的错误: {e}", exc_info=True)
