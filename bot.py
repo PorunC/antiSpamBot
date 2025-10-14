@@ -101,7 +101,59 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"\n{'='*80}")
         print(f"📨 新消息检测")
         print(f"👤 用户: {user.username or user.first_name} (ID: {user.id})")
-        print(f"💬 内容: {message.text[:100] if message.text else '[非文本消息]'}{'...' if message.text and len(message.text) > 100 else ''}")
+        
+        # 显示消息内容
+        message_preview = message.text[:100] if message.text else (message.caption[:100] if message.caption else '[非文本消息]')
+        if (message.text and len(message.text) > 100) or (message.caption and len(message.caption) > 100):
+            message_preview += '...'
+        print(f"💬 内容: {message_preview}")
+        
+        # 显示频道转发信息
+        if message.forward_from_chat:
+            channel_type = "频道" if message.forward_from_chat.type == "channel" else "群组"
+            channel_username = f"@{message.forward_from_chat.username}" if message.forward_from_chat.username else "无用户名"
+            print(f"📢 转发自{channel_type}: {message.forward_from_chat.title} ({channel_username})")
+        
+        # 显示链接信息
+        links = []
+        if message.entities:
+            for entity in message.entities:
+                if entity.type in ["url", "text_link"]:
+                    if entity.type == "text_link":
+                        links.append(entity.url)
+                    else:
+                        url_text = message.text[entity.offset:entity.offset + entity.length]
+                        links.append(url_text)
+        
+        if message.caption_entities:
+            for entity in message.caption_entities:
+                if entity.type in ["url", "text_link"]:
+                    if entity.type == "text_link":
+                        links.append(entity.url)
+                    else:
+                        url_text = message.caption[entity.offset:entity.offset + entity.length]
+                        links.append(url_text)
+        
+        if links:
+            print(f"🔗 包含链接: {', '.join(links[:3])}{'...' if len(links) > 3 else ''}")
+        
+        # 显示媒体类型
+        media_type = []
+        if message.photo:
+            media_type.append("图片")
+        if message.video:
+            media_type.append("视频")
+        if message.document:
+            media_type.append("文件")
+        if message.audio:
+            media_type.append("音频")
+        if message.voice:
+            media_type.append("语音")
+        if message.sticker:
+            media_type.append("贴纸")
+        if media_type:
+            print(f"📎 媒体类型: {', '.join(media_type)}")
+        
         print(f"🎯 垃圾消息判定: {'是 ❌' if result['is_spam'] else '否 ✅'}")
         print(f"📊 置信度: {result['confidence']:.2%} ({result['confidence']:.4f})")
         print(f"📋 类型: {result.get('category', '未知')}")

@@ -120,6 +120,36 @@ class SpamDetector:
         if message.caption:
             text_parts.append(message.caption)
         
+        # 频道转发信息
+        if message.forward_from_chat:
+            channel_info = f"[转发自频道: {message.forward_from_chat.title}"
+            if message.forward_from_chat.username:
+                channel_info += f" (@{message.forward_from_chat.username})"
+            channel_info += "]"
+            text_parts.append(channel_info)
+        
+        # 检测消息中的实体（链接、提及等）
+        if message.entities:
+            for entity in message.entities:
+                if entity.type == "text_link":
+                    text_parts.append(f"[链接: {entity.url}]")
+                elif entity.type == "url":
+                    # 提取 URL 文本
+                    url_text = message.text[entity.offset:entity.offset + entity.length]
+                    text_parts.append(f"[URL: {url_text}]")
+                elif entity.type == "mention":
+                    mention_text = message.text[entity.offset:entity.offset + entity.length]
+                    text_parts.append(f"[提及: {mention_text}]")
+        
+        # 检测图片说明中的实体
+        if message.caption_entities:
+            for entity in message.caption_entities:
+                if entity.type == "text_link":
+                    text_parts.append(f"[链接: {entity.url}]")
+                elif entity.type == "url":
+                    url_text = message.caption[entity.offset:entity.offset + entity.length]
+                    text_parts.append(f"[URL: {url_text}]")
+        
         # 联系人信息
         if message.contact:
             text_parts.append(

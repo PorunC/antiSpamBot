@@ -45,12 +45,14 @@ SPAM_DETECTION_PROMPT = """你是一个专业的垃圾消息检测助手。请�
 4. 是否包含不当内容（色情、暴力、违法信息等）
 5. 是否为恶意营销或拉群信息
 6. 是否包含大量无关链接或联系方式
+7. 是否为频道推广（转发频道消息、推广其他频道）
+8. 是否包含引导加入其他群组/频道的内容
 
 请以 JSON 格式回复，包含以下字段：
 - is_spam: true 或 false（是否为垃圾消息）
 - confidence: 0.0-1.0（置信度）
 - reason: 判断理由（简短说明）
-- category: 垃圾消息类型（如果是垃圾消息，可选：advertisement、scam、repetitive、inappropriate、marketing、other）
+- category: 垃圾消息类型（如果是垃圾消息，可选：advertisement、scam、repetitive、inappropriate、marketing、channel_spam、other）
 
 只返回 JSON，不要其他内容。
 
