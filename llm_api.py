@@ -28,7 +28,8 @@ class LLMClient:
         message_text: str, 
         username: str = "未知", 
         user_id: int = 0,
-        is_new_member: bool = False
+        is_new_member: bool = False,
+        risk_indicators: Dict[str, Any] = None
     ) -> Dict[str, Any]:
         """
         使用 LLM 分析消息内容
@@ -38,17 +39,31 @@ class LLMClient:
             username: 用户名
             user_id: 用户 ID
             is_new_member: 是否为新成员
+            risk_indicators: 风险指标字典
         
         Returns:
             分析结果字典，包含 is_spam, confidence, reason, category
         """
         try:
+            # 如果没有传入风险指标，使用空字典
+            if risk_indicators is None:
+                risk_indicators = {
+                    "risk_score": 0.0,
+                    "risk_flags": []
+                }
+            
+            # 构建风险指标描述
+            risk_desc = f"风险分数: {risk_indicators.get('risk_score', 0):.2f}"
+            if risk_indicators.get('risk_flags'):
+                risk_desc += f"\n风险标识: {', '.join(risk_indicators['risk_flags'])}"
+            
             # 构建提示词
             prompt = config.SPAM_DETECTION_PROMPT.format(
                 message_text=message_text,
                 username=username,
                 user_id=user_id,
-                is_new_member=is_new_member
+                is_new_member=is_new_member,
+                risk_indicators=risk_desc
             )
             
             logger.debug(f"正在分析消息，用户: {username} (ID: {user_id})")

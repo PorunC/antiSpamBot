@@ -5,6 +5,7 @@ import logging
 from typing import Dict, Any
 from telegram import Message, User
 from llm_api import llm_client
+from message_parser import message_parser
 import config
 
 logger = logging.getLogger(__name__)
@@ -17,7 +18,9 @@ class SpamDetector:
         """初始化检测器"""
         self.confidence_threshold = config.CONFIDENCE_THRESHOLD
         self.admin_user_ids = set(config.ADMIN_USER_IDS)
+        self.system_user_ids = set(config.SYSTEM_USER_IDS)
         logger.info(f"垃圾消息检测器初始化完成 - 置信度阈值: {self.confidence_threshold}")
+        logger.info(f"系统白名单用户: {self.system_user_ids}")
     
     async def check_message(self, message: Message) -> Dict[str, Any]:
         """
@@ -45,6 +48,16 @@ class SpamDetector:
                 "skip_reason": "管理员用户"
             }
         
+        # 检查是否为系统白名单用户（Telegram 官方账号等）
+        if user.id in self.system_user_ids:
+            logger.info(f"跳过系统白名单用户 - 用户: {user.username or user.first_name} (ID: {user.id})")
+            return {
+                "should_delete": False,
+                "should_ban": False,
+                "result": None,
+                "skip_reason": "系统白名单用户"
+            }
+        
         # 检查消息是否为机器人发送
         if user.is_bot:
             logger.debug(f"跳过机器人消息 - 用户: {user.username}")
@@ -55,16 +68,30 @@ class SpamDetector:
                 "skip_reason": "机器人消息"
             }
         
-        # 获取消息文本
-        message_text = self._extract_message_text(message)
+        # 使用新的消息解析器解析完整消息
+        parsed_message = message_parser.parse_message(message)
+        
+        # 合并白名单用户ID（管理员 + 系统白名单）
+        whitelist_user_ids = self.admin_user_ids | self.system_user_ids
+        
+        # 格式化消息用于分析（传入白名单用户ID）
+        message_text = message_parser.format_for_analysis(
+            parsed_message,
+            whitelist_user_ids=whitelist_user_ids
+        )
+        
+        # 提取风险指标
+        risk_indicators = message_parser.extract_risk_indicators(parsed_message)
         
         if not message_text:
-            logger.debug("消息无文本内容，跳过检测")
+            logger.debug("消息无可分析内容，跳过检测")
             return {
                 "should_delete": False,
                 "should_ban": False,
                 "result": None,
-                "skip_reason": "无文本内容"
+                "skip_reason": "无可分析内容",
+                "parsed_message": parsed_message,
+                "risk_indicators": risk_indicators
             }
         
         # 检查是否为新成员（加入群组后的第一条消息）
@@ -76,7 +103,8 @@ class SpamDetector:
             message_text=message_text,
             username=username,
             user_id=user.id,
-            is_new_member=is_new_member
+            is_new_member=is_new_member,
+            risk_indicators=risk_indicators
         )
         
         # 判断是否应该删除和封禁
@@ -90,6 +118,7 @@ class SpamDetector:
             f"检测结果 - 用户: {username} (ID: {user.id}), "
             f"删除: {should_delete}, 封禁: {should_ban}, "
             f"置信度: {result['confidence']:.2f}, "
+            f"风险分数: {risk_indicators['risk_score']:.2f}, "
             f"理由: {result['reason']}"
         )
         
@@ -97,12 +126,15 @@ class SpamDetector:
             "should_delete": should_delete,
             "should_ban": should_ban,
             "result": result,
-            "skip_reason": None
+            "skip_reason": None,
+            "parsed_message": parsed_message,
+            "risk_indicators": risk_indicators
         }
     
     def _extract_message_text(self, message: Message) -> str:
         """
-        提取消息文本内容
+        提取消息文本内容（已弃用，保留用于兼容性）
+        现在使用 message_parser 模块进行完整解析
         
         Args:
             message: Telegram 消息对象
@@ -110,62 +142,9 @@ class SpamDetector:
         Returns:
             消息文本
         """
-        text_parts = []
-        
-        # 普通文本
-        if message.text:
-            text_parts.append(message.text)
-        
-        # 图片说明
-        if message.caption:
-            text_parts.append(message.caption)
-        
-        # 频道转发信息
-        if message.forward_from_chat:
-            channel_info = f"[转发自频道: {message.forward_from_chat.title}"
-            if message.forward_from_chat.username:
-                channel_info += f" (@{message.forward_from_chat.username})"
-            channel_info += "]"
-            text_parts.append(channel_info)
-        
-        # 检测消息中的实体（链接、提及等）
-        if message.entities:
-            for entity in message.entities:
-                if entity.type == "text_link":
-                    text_parts.append(f"[链接: {entity.url}]")
-                elif entity.type == "url":
-                    # 提取 URL 文本
-                    url_text = message.text[entity.offset:entity.offset + entity.length]
-                    text_parts.append(f"[URL: {url_text}]")
-                elif entity.type == "mention":
-                    mention_text = message.text[entity.offset:entity.offset + entity.length]
-                    text_parts.append(f"[提及: {mention_text}]")
-        
-        # 检测图片说明中的实体
-        if message.caption_entities:
-            for entity in message.caption_entities:
-                if entity.type == "text_link":
-                    text_parts.append(f"[链接: {entity.url}]")
-                elif entity.type == "url":
-                    url_text = message.caption[entity.offset:entity.offset + entity.length]
-                    text_parts.append(f"[URL: {url_text}]")
-        
-        # 联系人信息
-        if message.contact:
-            text_parts.append(
-                f"联系人: {message.contact.first_name} "
-                f"{message.contact.last_name or ''} "
-                f"{message.contact.phone_number or ''}"
-            )
-        
-        # 位置信息
-        if message.location:
-            text_parts.append(
-                f"位置: 纬度 {message.location.latitude}, "
-                f"经度 {message.location.longitude}"
-            )
-        
-        return " ".join(text_parts)
+        # 使用新的解析器
+        parsed_message = message_parser.parse_message(message)
+        return message_parser.format_for_analysis(parsed_message)
     
     def _is_new_member_message(self, message: Message) -> bool:
         """

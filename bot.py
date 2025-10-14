@@ -3,6 +3,7 @@ Telegram 垃圾消息过滤机器人主程序
 """
 import logging
 import sys
+import asyncio
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -72,6 +73,26 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(status_text, parse_mode='Markdown')
 
 
+async def handle_service_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    处理系统服务消息（例如：XXX left the chat）
+    自动删除这些消息以保持群组整洁
+    """
+    message = update.message
+    
+    # 只处理群组消息
+    if message.chat.type not in ['group', 'supergroup']:
+        return
+    
+    # 检查是否是 left_chat_member 消息（用户离开或被移除）
+    if message.left_chat_member:
+        try:
+            await message.delete()
+            logger.info(f"已删除系统服务消息 - 用户 {message.left_chat_member.first_name} 离开群组")
+        except TelegramError as e:
+            logger.debug(f"删除系统服务消息失败: {e}")
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     处理群组消息
@@ -96,6 +117,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 打印所有消息的检测结果和置信度
         user = message.from_user
         result = detection_result["result"]
+        parsed_message = detection_result.get("parsed_message", {})
+        risk_indicators = detection_result.get("risk_indicators", {})
         
         # 在控制台打印每条消息的置信度
         print(f"\n{'='*80}")
@@ -108,79 +131,84 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             message_preview += '...'
         print(f"💬 内容: {message_preview}")
         
-        # 检测风险标识
-        risk_flags = []
+        # 使用新的解析结果显示详细信息
+        risk_flags = risk_indicators.get("risk_flags", [])
+        
+        # 显示回复信息
+        reply_info = parsed_message.get("reply")
+        if reply_info and reply_info.get("is_reply"):
+            reply_user = reply_info.get("reply_to_user", {})
+            reply_username = reply_user.get("username") or reply_user.get("full_name", "未知")
+            print(f"↩️  回复: @{reply_username} 的消息")
+            reply_text = reply_info.get("reply_to_text", "")
+            if reply_text:
+                preview = reply_text[:50] + "..." if len(reply_text) > 50 else reply_text
+                print(f"   回复内容: {preview}")
         
         # 显示频道转发信息（高风险标识）
-        if message.forward_from_chat:
-            channel_type = "频道" if message.forward_from_chat.type == "channel" else "群组"
-            channel_username = f"@{message.forward_from_chat.username}" if message.forward_from_chat.username else "无用户名"
-            print(f"⚠️  【高风险】转发自{channel_type}: {message.forward_from_chat.title} ({channel_username})")
-            risk_flags.append("频道转发")
+        forward_info = parsed_message.get("forward")
+        if forward_info and forward_info.get("is_forwarded"):
+            forward_chat = forward_info.get("forward_from_chat")
+            if forward_chat:
+                channel_type = "频道" if forward_chat.get("type") == "channel" else "群组"
+                channel_username = f"@{forward_chat.get('username')}" if forward_chat.get("username") else "无用户名"
+                print(f"⚠️  【高风险】转发自{channel_type}: {forward_chat.get('title', '未知')} ({channel_username})")
+            else:
+                forward_user = forward_info.get("forward_from")
+                if forward_user:
+                    print(f"↪️  转发自用户: {forward_user.get('full_name', '未知')}")
         
         # 显示链接信息
-        links = []
-        telegram_channel_links = []
-        
-        if message.entities:
-            for entity in message.entities:
-                if entity.type in ["url", "text_link"]:
-                    if entity.type == "text_link":
-                        links.append(entity.url)
-                        # 检测是否为 Telegram 频道/群组链接
-                        if "t.me/" in entity.url.lower() or "telegram.me/" in entity.url.lower():
-                            telegram_channel_links.append(entity.url)
-                    else:
-                        url_text = message.text[entity.offset:entity.offset + entity.length]
-                        links.append(url_text)
-                        # 检测是否为 Telegram 频道/群组链接
-                        if "t.me/" in url_text.lower() or "telegram.me/" in url_text.lower():
-                            telegram_channel_links.append(url_text)
-        
-        if message.caption_entities:
-            for entity in message.caption_entities:
-                if entity.type in ["url", "text_link"]:
-                    if entity.type == "text_link":
-                        links.append(entity.url)
-                        if "t.me/" in entity.url.lower() or "telegram.me/" in entity.url.lower():
-                            telegram_channel_links.append(entity.url)
-                    else:
-                        url_text = message.caption[entity.offset:entity.offset + entity.length]
-                        links.append(url_text)
-                        if "t.me/" in url_text.lower() or "telegram.me/" in url_text.lower():
-                            telegram_channel_links.append(url_text)
+        categorized_links = parsed_message.get("categorized_links", {})
+        telegram_links = categorized_links.get("telegram_links", [])
+        external_links = categorized_links.get("external_links", [])
+        mentions = categorized_links.get("mentions", [])
+        hashtags = categorized_links.get("hashtags", [])
         
         # 显示 Telegram 频道链接（高风险）
-        if telegram_channel_links:
-            print(f"⚠️  【高风险】包含 Telegram 频道/群组链接: {', '.join(telegram_channel_links[:3])}{'...' if len(telegram_channel_links) > 3 else ''}")
-            risk_flags.append("频道链接")
+        if telegram_links:
+            print(f"⚠️  【高风险】包含 Telegram 频道/群组链接: {', '.join(telegram_links[:3])}{'...' if len(telegram_links) > 3 else ''}")
         
         # 显示其他链接
-        other_links = [link for link in links if link not in telegram_channel_links]
-        if other_links:
-            print(f"🔗 包含其他链接: {', '.join(other_links[:3])}{'...' if len(other_links) > 3 else ''}")
+        if external_links:
+            print(f"🔗 包含外部链接: {', '.join(external_links[:3])}{'...' if len(external_links) > 3 else ''}")
+        
+        # 显示提及和标签
+        if mentions:
+            print(f"👥 提及用户: {', '.join(mentions[:5])}{'...' if len(mentions) > 5 else ''}")
+        
+        if hashtags:
+            print(f"#️⃣ 话题标签: {', '.join(hashtags[:5])}{'...' if len(hashtags) > 5 else ''}")
         
         # 显示媒体类型
-        media_type = []
-        if message.photo:
-            media_type.append("图片")
-        if message.video:
-            media_type.append("视频")
-        if message.document:
-            media_type.append("文件")
-        if message.audio:
-            media_type.append("音频")
-        if message.voice:
-            media_type.append("语音")
-        if message.sticker:
-            media_type.append("贴纸")
-        if media_type:
-            print(f"📎 媒体类型: {', '.join(media_type)}")
+        media_info = parsed_message.get("media", {})
+        if media_info.get("has_media"):
+            media_types_cn = {
+                "photo": "图片", "video": "视频", "document": "文件",
+                "audio": "音频", "voice": "语音", "sticker": "贴纸",
+                "video_note": "视频消息", "animation": "动画",
+                "contact": "联系人", "location": "位置", "venue": "场馆",
+                "poll": "投票", "dice": "骰子"
+            }
+            media_types = [media_types_cn.get(mt, mt) for mt in media_info.get("media_types", [])]
+            print(f"📎 媒体类型: {', '.join(media_types)}")
+        
+        # 显示按钮信息
+        buttons = parsed_message.get("buttons")
+        if buttons:
+            button_count = sum(len(row) for row in buttons)
+            print(f"🔘 包含按钮: {button_count}个")
+        
+        # 显示媒体组信息
+        media_group = parsed_message.get("media_group")
+        if media_group and media_group.get("is_media_group"):
+            print(f"� 媒体组: 相册或媒体集合")
         
         # 显示风险评估
         if risk_flags:
             print(f"\n🚨 风险标识: {' + '.join(risk_flags)}")
-            print(f"⚠️  风险说明: 消息包含{'和'.join(risk_flags)}，大概率为广告/诈骗消息！")
+            print(f"⚠️  风险分数: {risk_indicators.get('risk_score', 0):.2f}")
+            print(f"⚠️  风险说明: 消息包含{len(risk_flags)}个风险因素，需要重点关注！")
         
         print(f"\n🎯 垃圾消息判定: {'是 ❌' if result['is_spam'] else '否 ✅'}")
         print(f"📊 置信度: {result['confidence']:.2%} ({result['confidence']:.4f})")
@@ -199,16 +227,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             
             try:
-                # 删除消息
-                await message.delete()
-                logger.info(f"已删除消息 - 消息 ID: {message.message_id}")
-                
-                # 封禁用户
-                await context.bot.ban_chat_member(
+                # 封禁用户（先封禁再删除消息，这样可以捕获封禁产生的系统消息）
+                ban_result = await context.bot.ban_chat_member(
                     chat_id=message.chat_id,
                     user_id=user.id
                 )
                 logger.info(f"已封禁用户 - {user.username or user.first_name} (ID: {user.id})")
+                
+                # 删除垃圾消息
+                await message.delete()
+                logger.info(f"已删除消息 - 消息 ID: {message.message_id}")
                 
                 # 发送通知消息（可选）
                 notification_text = (
@@ -225,15 +253,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     text=notification_text
                 )
                 
-                # 10 秒后删除通知消息
-                context.application.job_queue.run_once(
-                    delete_notification,
-                    when=10,
-                    data={
-                        'chat_id': message.chat_id,
-                        'message_id': notification.message_id
-                    }
-                )
+                # 10 秒后删除通知消息（如果 JobQueue 可用）
+                if context.application.job_queue:
+                    context.application.job_queue.run_once(
+                        delete_notification,
+                        when=10,
+                        data={
+                            'chat_id': message.chat_id,
+                            'message_id': notification.message_id
+                        }
+                    )
+                else:
+                    logger.warning("JobQueue 未配置，通知消息将不会自动删除")
                 
             except TelegramError as e:
                 logger.error(f"处理垃圾消息时出错: {e}")
@@ -281,18 +312,40 @@ def main():
         
         logger.info("正在启动 Telegram 垃圾消息过滤机器人...")
         
-        # 创建应用
-        application = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
+        # 创建应用构建器
+        app_builder = Application.builder().token(config.TELEGRAM_BOT_TOKEN)
+        
+        # 如果配置了代理，则使用代理
+        if config.PROXY_URL:
+            logger.info(f"🌐 使用代理: {config.PROXY_URL}")
+            from telegram.request import HTTPXRequest
+            request = HTTPXRequest(
+                connection_pool_size=8,
+                proxy_url=config.PROXY_URL
+            )
+            app_builder.request(request)
+        
+        # 构建应用
+        application = app_builder.build()
         
         # 添加命令处理器
         application.add_handler(CommandHandler("start", start_command))
         application.add_handler(CommandHandler("help", help_command))
         application.add_handler(CommandHandler("status", status_command))
         
+        # 添加系统服务消息处理器（优先级最高，处理用户离开/被移除的消息）
+        application.add_handler(
+            MessageHandler(
+                filters.StatusUpdate.LEFT_CHAT_MEMBER,
+                handle_service_message
+            ),
+            group=-1  # 使用负数组让它优先处理
+        )
+        
         # 添加消息处理器（处理所有文本消息和媒体消息）
         application.add_handler(
             MessageHandler(
-                filters.ALL & ~filters.COMMAND,
+                filters.ALL & ~filters.COMMAND & ~filters.StatusUpdate.LEFT_CHAT_MEMBER,
                 handle_message
             )
         )
