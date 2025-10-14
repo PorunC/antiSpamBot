@@ -108,34 +108,57 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             message_preview += '...'
         print(f"💬 内容: {message_preview}")
         
-        # 显示频道转发信息
+        # 检测风险标识
+        risk_flags = []
+        
+        # 显示频道转发信息（高风险标识）
         if message.forward_from_chat:
             channel_type = "频道" if message.forward_from_chat.type == "channel" else "群组"
             channel_username = f"@{message.forward_from_chat.username}" if message.forward_from_chat.username else "无用户名"
-            print(f"📢 转发自{channel_type}: {message.forward_from_chat.title} ({channel_username})")
+            print(f"⚠️  【高风险】转发自{channel_type}: {message.forward_from_chat.title} ({channel_username})")
+            risk_flags.append("频道转发")
         
         # 显示链接信息
         links = []
+        telegram_channel_links = []
+        
         if message.entities:
             for entity in message.entities:
                 if entity.type in ["url", "text_link"]:
                     if entity.type == "text_link":
                         links.append(entity.url)
+                        # 检测是否为 Telegram 频道/群组链接
+                        if "t.me/" in entity.url.lower() or "telegram.me/" in entity.url.lower():
+                            telegram_channel_links.append(entity.url)
                     else:
                         url_text = message.text[entity.offset:entity.offset + entity.length]
                         links.append(url_text)
+                        # 检测是否为 Telegram 频道/群组链接
+                        if "t.me/" in url_text.lower() or "telegram.me/" in url_text.lower():
+                            telegram_channel_links.append(url_text)
         
         if message.caption_entities:
             for entity in message.caption_entities:
                 if entity.type in ["url", "text_link"]:
                     if entity.type == "text_link":
                         links.append(entity.url)
+                        if "t.me/" in entity.url.lower() or "telegram.me/" in entity.url.lower():
+                            telegram_channel_links.append(entity.url)
                     else:
                         url_text = message.caption[entity.offset:entity.offset + entity.length]
                         links.append(url_text)
+                        if "t.me/" in url_text.lower() or "telegram.me/" in url_text.lower():
+                            telegram_channel_links.append(url_text)
         
-        if links:
-            print(f"🔗 包含链接: {', '.join(links[:3])}{'...' if len(links) > 3 else ''}")
+        # 显示 Telegram 频道链接（高风险）
+        if telegram_channel_links:
+            print(f"⚠️  【高风险】包含 Telegram 频道/群组链接: {', '.join(telegram_channel_links[:3])}{'...' if len(telegram_channel_links) > 3 else ''}")
+            risk_flags.append("频道链接")
+        
+        # 显示其他链接
+        other_links = [link for link in links if link not in telegram_channel_links]
+        if other_links:
+            print(f"🔗 包含其他链接: {', '.join(other_links[:3])}{'...' if len(other_links) > 3 else ''}")
         
         # 显示媒体类型
         media_type = []
@@ -154,7 +177,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if media_type:
             print(f"📎 媒体类型: {', '.join(media_type)}")
         
-        print(f"🎯 垃圾消息判定: {'是 ❌' if result['is_spam'] else '否 ✅'}")
+        # 显示风险评估
+        if risk_flags:
+            print(f"\n🚨 风险标识: {' + '.join(risk_flags)}")
+            print(f"⚠️  风险说明: 消息包含{'和'.join(risk_flags)}，大概率为广告/诈骗消息！")
+        
+        print(f"\n🎯 垃圾消息判定: {'是 ❌' if result['is_spam'] else '否 ✅'}")
         print(f"📊 置信度: {result['confidence']:.2%} ({result['confidence']:.4f})")
         print(f"📋 类型: {result.get('category', '未知')}")
         print(f"💡 理由: {result['reason']}")
