@@ -122,6 +122,87 @@ class LLMClient:
             logger.error(f"LLM API 调用失败: {e}", exc_info=True)
             return self._get_default_result(error=str(e))
     
+    async def analyze_username(
+        self,
+        username: str,
+        full_name: str,
+        join_message: str,
+        user_id: int
+    ) -> Dict[str, Any]:
+        """
+        使用 LLM 检查用户入群时的用户名是否违规
+        
+        Args:
+            username: Telegram 用户名
+            full_name: 用户显示名称
+            join_message: 入群系统消息文本
+            user_id: 用户 ID
+        
+        Returns:
+            分析结果字典，包含 is_violation, confidence, reason, category
+        """
+        try:
+            formatted_username = username or "无用户名"
+            formatted_full_name = full_name or "未知"
+            formatted_join_message = join_message or ""
+            
+            prompt = config.USERNAME_CHECK_PROMPT.format(
+                username=formatted_username,
+                full_name=formatted_full_name,
+                join_message=formatted_join_message,
+                user_id=user_id
+            )
+            
+            logger.debug(f"正在审核用户名，用户 ID: {user_id}, 用户名: {formatted_username}")
+            
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "你是一个专业的群组安全审核助手，专注识别违规用户名。"
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                temperature=0.2,
+                max_tokens=400,
+                response_format={"type": "json_object"}
+            )
+            
+            result_text = response.choices[0].message.content.strip()
+            logger.debug(f"用户名审核 LLM 响应: {result_text}")
+            
+            result = json.loads(result_text)
+            
+            required_fields = ["is_violation", "confidence", "reason"]
+            if not all(field in result for field in required_fields):
+                logger.error(f"用户名审核响应缺少必需字段: {result}")
+                return self._get_default_username_result(error="响应格式错误")
+            
+            result["is_violation"] = bool(result["is_violation"])
+            result["confidence"] = float(result["confidence"])
+            result["reason"] = str(result["reason"])
+            result["category"] = result.get("category", "other")
+            
+            logger.info(
+                f"用户名审核完成 - 用户 ID: {user_id}, 用户名: {formatted_username}, "
+                f"违规: {result['is_violation']}, 置信度: {result['confidence']:.2f}, "
+                f"理由: {result['reason']}"
+            )
+            
+            return result
+        
+        except json.JSONDecodeError as e:
+            logger.error(f"解析用户名审核 LLM 响应 JSON 失败: {e}")
+            return self._get_default_username_result(error="JSON 解析失败")
+        
+        except Exception as e:
+            logger.error(f"用户名审核 LLM 调用失败: {e}", exc_info=True)
+            return self._get_default_username_result(error=str(e))
+    
     def _get_default_result(self, error: str = "") -> Dict[str, Any]:
         """
         返回默认结果（当 API 调用失败时）
@@ -134,6 +215,23 @@ class LLMClient:
         """
         return {
             "is_spam": False,
+            "confidence": 0.0,
+            "reason": f"API 调用失败: {error}",
+            "category": "error"
+        }
+    
+    def _get_default_username_result(self, error: str = "") -> Dict[str, Any]:
+        """
+        返回用户名审核的默认结果
+        
+        Args:
+            error: 错误信息
+        
+        Returns:
+            默认结果字典
+        """
+        return {
+            "is_violation": False,
             "confidence": 0.0,
             "reason": f"API 调用失败: {error}",
             "category": "error"

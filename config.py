@@ -21,6 +21,7 @@ LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
 
 # 垃圾消息检测配置
 CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", "0.7"))
+USERNAME_CONFIDENCE_THRESHOLD = float(os.getenv("USERNAME_CONFIDENCE_THRESHOLD", "0.75"))
 
 # 管理员用户 ID（不会被踢出）
 ADMIN_USER_IDS_STR = os.getenv("ADMIN_USER_IDS", "")
@@ -130,6 +131,46 @@ SPAM_DETECTION_PROMPT = """你是一个专业的垃圾消息检测助手。请�
   "confidence": 0.95,
   "reason": "包含明显的商业广告和推广内容",
   "category": "advertisement"
+}}
+"""
+
+USERNAME_CHECK_PROMPT = """你是一个群组安全审核助手。请根据用户入群时的用户名信息判断其是否违规、包含广告、引流、色情、诈骗或其他不当内容。
+
+用户信息：
+- 用户 ID: {user_id}
+- 用户名: {username}
+- 显示名称: {full_name}
+
+入群提示消息：
+```
+{join_message}
+```
+
+判定标准：
+1. 用户名是否包含联系方式（微信、QQ、电话、邮箱等）或引导文字
+2. 用户名是否包含广告、推广、拉人进群、交易等关键词
+3. 用户名是否包含色情、暴力、违法或其他不当内容
+4. 用户名是否疑似仿冒官方账号或具备诈骗风险
+5. 用户名是否严重影响群组安全或秩序
+6. 用户昵称是否属于引流打广告
+    引流用户昵称如：
+    - UW👆飛机会员开通 3.3U 限今天最低价☄️EF 
+    - UF✌️小飞机会员激活 2.7U 官保💪QO
+
+请仅依据用户名和显示名称进行判断，不要猜测其他信息。
+
+请以 JSON 格式回复，包含以下字段：
+- is_violation: true 或 false（用户名是否违规）
+- confidence: 0.0-1.0（置信度）
+- reason: 判断理由（简短说明）
+- category: 违规类型（advertisement、scam、inappropriate、marketing、contact、impersonation、other）
+
+示例回复格式：
+{{
+  "is_violation": true,
+  "confidence": 0.92,
+  "reason": "用户名包含明显的广告引流内容",
+  "category": "marketing"
 }}
 """
 

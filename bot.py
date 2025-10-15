@@ -14,6 +14,7 @@ from telegram.ext import (
 )
 from telegram.error import TelegramError
 import config
+from llm_api import llm_client
 from spam_detector import spam_detector
 
 # 配置日志
@@ -91,6 +92,84 @@ async def handle_service_message(update: Update, context: ContextTypes.DEFAULT_T
             logger.info(f"已删除系统服务消息 - 用户 {message.left_chat_member.first_name} 离开群组")
         except TelegramError as e:
             logger.debug(f"删除系统服务消息失败: {e}")
+
+    # 检查是否是新成员加入消息
+    if message.new_chat_members:
+        member_display_names = []
+        for member in message.new_chat_members:
+            display_name = getattr(member, "full_name", None) or member.username or member.first_name or "未知用户"
+            member_display_names.append(display_name)
+            
+            if member.id in config.ADMIN_USER_IDS or member.id in config.SYSTEM_USER_IDS:
+                logger.debug(f"跳过用户名审核（白名单）- 用户: {display_name} (ID: {member.id})")
+                continue
+            
+            if member.is_bot:
+                logger.debug(f"跳过用户名审核（机器人）- 用户: {display_name} (ID: {member.id})")
+                continue
+            
+            join_notice = message.text or f"{display_name} 加入群聊"
+            username_result = await llm_client.analyze_username(
+                username=member.username or "",
+                full_name=getattr(member, "full_name", None) or "",
+                join_message=join_notice,
+                user_id=member.id
+            )
+            
+            if (
+                username_result["is_violation"] and
+                username_result["confidence"] >= config.USERNAME_CONFIDENCE_THRESHOLD
+            ):
+                logger.warning(
+                    f"检测到违规用户名 - 用户: {display_name} (ID: {member.id}), "
+                    f"置信度: {username_result['confidence']:.2f}, 理由: {username_result['reason']}"
+                )
+                try:
+                    await context.bot.ban_chat_member(
+                        chat_id=message.chat_id,
+                        user_id=member.id
+                    )
+                    logger.info(f"已移除违规用户名用户 - {display_name} (ID: {member.id})")
+                    
+                    notification_lines = [
+                        "🚫 检测到违规用户名并已移除",
+                        f"👤 用户: {display_name}",
+                        f"🆔 ID: {member.id}",
+                    ]
+                    if member.username:
+                        notification_lines.append(f"📛 用户名: @{member.username}")
+                    notification_lines.extend([
+                        f"📊 置信度: {username_result['confidence']:.0%}",
+                        f"💬 理由: {username_result['reason']}"
+                    ])
+                    notification = await context.bot.send_message(
+                        chat_id=message.chat_id,
+                        text="\n".join(notification_lines)
+                    )
+                    
+                    if context.application.job_queue:
+                        context.application.job_queue.run_once(
+                            delete_notification,
+                            when=10,
+                            data={
+                                'chat_id': message.chat_id,
+                                'message_id': notification.message_id
+                            }
+                        )
+                except TelegramError as e:
+                    logger.error(f"移除违规用户名用户失败: {e}")
+            else:
+                logger.info(
+                    f"✅ 用户名审核通过 - 用户: {display_name} (ID: {member.id}), "
+                    f"置信度: {username_result['confidence']:.2f}, 理由: {username_result['reason']}"
+                )
+        
+        member_names = ", ".join(member_display_names)
+        try:
+            await message.delete()
+            logger.info(f"已删除系统服务消息 - 新成员加入: {member_names}")
+        except TelegramError as e:
+            logger.debug(f"删除新成员加入消息失败: {e}")
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -333,10 +412,10 @@ def main():
         application.add_handler(CommandHandler("help", help_command))
         application.add_handler(CommandHandler("status", status_command))
         
-        # 添加系统服务消息处理器（优先级最高，处理用户离开/被移除的消息）
+        # 添加系统服务消息处理器（优先级最高，处理用户离开/加入的系统消息）
         application.add_handler(
             MessageHandler(
-                filters.StatusUpdate.LEFT_CHAT_MEMBER,
+                filters.StatusUpdate.LEFT_CHAT_MEMBER | filters.StatusUpdate.NEW_CHAT_MEMBERS,
                 handle_service_message
             ),
             group=-1  # 使用负数组让它优先处理
@@ -345,7 +424,7 @@ def main():
         # 添加消息处理器（处理所有文本消息和媒体消息）
         application.add_handler(
             MessageHandler(
-                filters.ALL & ~filters.COMMAND & ~filters.StatusUpdate.LEFT_CHAT_MEMBER,
+                filters.ALL & ~filters.COMMAND & ~filters.StatusUpdate.LEFT_CHAT_MEMBER & ~filters.StatusUpdate.NEW_CHAT_MEMBERS,
                 handle_message
             )
         )
