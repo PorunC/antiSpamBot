@@ -5,6 +5,8 @@ Telegram 消息解析工具模块
 from typing import Dict, List, Optional, Any
 from telegram import Message, User, Chat, MessageEntity, PhotoSize
 import logging
+import unicodedata
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -82,18 +84,10 @@ def extract_entities(message: Message) -> List[Dict[str, Any]]:
     entities_list = []
     
     # 处理消息文本实体
-    if message.entities and message.text:
-        for entity in message.entities:
-            entity_info = _parse_entity(entity, message.text)
-            if entity_info:
-                entities_list.append(entity_info)
+    entities_list.extend(_parse_entities_list(message.entities, message.text))
     
     # 处理图片说明实体
-    if message.caption_entities and message.caption:
-        for entity in message.caption_entities:
-            entity_info = _parse_entity(entity, message.caption)
-            if entity_info:
-                entities_list.append(entity_info)
+    entities_list.extend(_parse_entities_list(message.caption_entities, message.caption))
     
     return entities_list
 
@@ -125,6 +119,30 @@ def _parse_entity(entity: MessageEntity, text: str) -> Optional[Dict[str, Any]]:
         entity_info["user"] = format_user_info(entity.user)
     
     return entity_info
+
+
+def _parse_entities_list(entities: Optional[List[MessageEntity]], text: Optional[str]) -> List[Dict[str, Any]]:
+    """
+    批量解析实体列表
+    
+    Args:
+        entities: 实体对象列表
+        text: 对应的文本
+    
+    Returns:
+        解析后的实体信息列表
+    """
+    parsed_entities: List[Dict[str, Any]] = []
+    
+    if not entities or not text:
+        return parsed_entities
+    
+    for entity in entities:
+        entity_info = _parse_entity(entity, text)
+        if entity_info:
+            parsed_entities.append(entity_info)
+    
+    return parsed_entities
 
 
 def extract_media_info(message: Message) -> Dict[str, Any]:
@@ -355,7 +373,7 @@ def extract_forward_info(message: Message) -> Optional[Dict[str, Any]]:
     forward_info["forward_from_message_id"] = getattr(message, 'forward_from_message_id', None)
     forward_info["forward_signature"] = getattr(message, 'forward_signature', None)
     forward_info["forward_sender_name"] = getattr(message, 'forward_sender_name', None)
-    forward_info["forward_origin"] = forward_origin
+    forward_info["forward_origin"] = _parse_message_origin(forward_origin) if forward_origin else None
     
     # 转发自用户
     if forward_from:
@@ -376,10 +394,93 @@ def extract_forward_info(message: Message) -> Optional[Dict[str, Any]]:
                 forward_info["forward_from_chat"] = format_chat_info(forward_origin.sender_chat)
             elif hasattr(forward_origin, 'chat'):
                 forward_info["forward_from_chat"] = format_chat_info(forward_origin.chat)
+            else:
+                raw_data = forward_origin.__dict__ if hasattr(forward_origin, '__dict__') else {}
+                logger.debug(f"未知的 forward_origin 类型: {origin_type}, 数据: {raw_data}")
         except Exception as e:
             logger.warning(f"处理 forward_origin 时出错: {e}")
     
     return forward_info
+
+
+def extract_external_reply_info(message: Message) -> Optional[Dict[str, Any]]:
+    """
+    提取跨聊天引用（external reply）信息
+    
+    Args:
+        message: Telegram 消息对象
+    
+    Returns:
+        外部引用信息字典，如果没有引用则返回 None
+    """
+    external_reply = getattr(message, "external_reply", None)
+    if not external_reply:
+        return None
+    
+    reply_info: Dict[str, Any] = {
+        "is_external_reply": True,
+        "chat": format_chat_info(getattr(external_reply, "chat", None)),
+        "message_id": getattr(external_reply, "message_id", None),
+        "origin": _parse_message_origin(getattr(external_reply, "origin", None)),
+        "text": getattr(external_reply, "text", None),
+        "caption": getattr(external_reply, "caption", None),
+        "entities": _parse_entities_list(getattr(external_reply, "entities", None), getattr(external_reply, "text", None)),
+        "caption_entities": _parse_entities_list(
+            getattr(external_reply, "caption_entities", None),
+            getattr(external_reply, "caption", None)
+        ),
+    }
+    
+    # 处理引用片段（quote）
+    quote_entities: List[Dict[str, Any]] = []
+    quote = getattr(external_reply, "quote", None)
+    if quote:
+        quote_text = getattr(quote, "text", None)
+        if quote_text and not reply_info["text"]:
+            reply_info["text"] = quote_text
+        
+        quote_entities = _parse_entities_list(getattr(quote, "entities", None), quote_text)
+        if quote_entities:
+            reply_info.setdefault("quote", {})["entities"] = quote_entities
+        
+        if quote_text:
+            reply_info.setdefault("quote", {})["text"] = quote_text
+        
+        quote_media_info = _extract_quote_media(quote)
+        if quote_media_info:
+            reply_info.setdefault("quote", {})["media"] = quote_media_info
+    
+    # 分类链接信息
+    combined_entities: List[Dict[str, Any]] = []
+    combined_entities.extend(reply_info["entities"])
+    combined_entities.extend(reply_info["caption_entities"])
+    if quote and quote_entities:
+        combined_entities.extend(quote_entities)
+    
+    if combined_entities:
+        reply_info["categorized_links"] = categorize_links(combined_entities)
+    else:
+        reply_info["categorized_links"] = {
+            "telegram_links": [],
+            "external_links": [],
+            "mentions": [],
+            "hashtags": [],
+            "bot_commands": [],
+            "embedded_channel_links": []
+        }
+    
+    # 媒体信息（best-effort）
+    try:
+        reply_info["media"] = extract_media_info(external_reply)  # type: ignore[arg-type]
+    except Exception as exc:
+        logger.debug(f"提取 external_reply 媒体信息失败: {exc}")
+        reply_info["media"] = {
+            "has_media": False,
+            "media_types": [],
+            "details": {}
+        }
+    
+    return reply_info
 
 
 def extract_reply_info(message: Message) -> Optional[Dict[str, Any]]:
@@ -495,10 +596,10 @@ def extract_urls_from_text(text: str) -> List[str]:
 def categorize_links(entities: List[Dict[str, Any]]) -> Dict[str, List[str]]:
     """
     对链接进行分类
-    
+
     Args:
         entities: 实体列表
-    
+
     Returns:
         分类后的链接字典
     """
@@ -507,14 +608,18 @@ def categorize_links(entities: List[Dict[str, Any]]) -> Dict[str, List[str]]:
         "external_links": [],
         "mentions": [],
         "hashtags": [],
-        "bot_commands": []
+        "bot_commands": [],
+        "embedded_channel_links": []  # 新增：嵌入的频道消息链接
     }
-    
+
     for entity in entities:
         if entity["type"] in ["url", "text_link"]:
             url = entity.get("url") or entity.get("text", "")
             if "t.me/" in url.lower() or "telegram.me/" in url.lower():
                 categorized["telegram_links"].append(url)
+                # 检测是否是频道消息链接 (格式: t.me/channel_name/message_id)
+                if _is_embedded_channel_message_link(url):
+                    categorized["embedded_channel_links"].append(url)
             else:
                 categorized["external_links"].append(url)
         elif entity["type"] == "mention":
@@ -523,5 +628,279 @@ def categorize_links(entities: List[Dict[str, Any]]) -> Dict[str, List[str]]:
             categorized["hashtags"].append(entity["text"])
         elif entity["type"] == "bot_command":
             categorized["bot_commands"].append(entity["text"])
-    
+
     return categorized
+
+
+def _is_embedded_channel_message_link(url: str) -> bool:
+    """
+    检测 URL 是否是频道消息链接（会显示嵌入预览）
+
+    Args:
+        url: URL 字符串
+
+    Returns:
+        是否是频道消息链接
+    """
+    import re
+    # 匹配 t.me/channel_name/123 或 t.me/c/channel_id/123 格式
+    # 这种格式会在 Telegram 客户端中显示嵌入消息预览
+    # 使用 ^ 或 :// 确保 t.me 是域名而不是路径的一部分
+    pattern = r'(?:^|://|^https?://)t\.me/(?:c/\d+/\d+|[a-zA-Z0-9_]+/\d+)'
+    return bool(re.search(pattern, url.lower()))
+
+
+def _parse_message_origin(origin: Any) -> Optional[Dict[str, Any]]:
+    """
+    将 MessageOrigin 对象转换成字典
+    
+    Args:
+        origin: MessageOrigin 实例
+    
+    Returns:
+        包含来源详情的字典
+    """
+    if not origin:
+        return None
+    
+    origin_info: Dict[str, Any] = {"type": type(origin).__name__}
+    
+    if hasattr(origin, "sender_user"):
+        origin_info["sender_user"] = format_user_info(getattr(origin, "sender_user", None))
+    if hasattr(origin, "sender_chat"):
+        origin_info["sender_chat"] = format_chat_info(getattr(origin, "sender_chat", None))
+    if hasattr(origin, "chat"):
+        origin_info["chat"] = format_chat_info(getattr(origin, "chat", None))
+    if hasattr(origin, "author_signature"):
+        origin_info["author_signature"] = getattr(origin, "author_signature", None)
+    if hasattr(origin, "date"):
+        origin_info["date"] = getattr(origin, "date", None)
+    if hasattr(origin, "message_id"):
+        origin_info["message_id"] = getattr(origin, "message_id", None)
+    
+    return origin_info
+
+
+def analyze_text_formatting(text: str, entities: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    分析文本格式化和特殊字符（检测恶意格式化）
+
+    Args:
+        text: 消息文本
+        entities: 实体列表（字典格式）
+
+    Returns:
+        格式化分析结果
+    """
+    # 格式化类型映射
+    FORMATTING_ENTITY_TYPES = {
+        'bold': '粗体',
+        'italic': '斜体',
+        'underline': '下划线',
+        'strikethrough': '删除线',
+        'spoiler': '剧透',
+        'code': '代码',
+        'pre': '代码块',
+        'text_link': '隐藏链接',
+        'text_mention': '隐藏提及',
+        'custom_emoji': '自定义emoji',
+    }
+
+    # 高风险格式化
+    HIGH_RISK_FORMATTING = ['spoiler', 'text_link', 'text_mention', 'custom_emoji']
+
+    result = {
+        'has_formatting': False,
+        'formatting_types': [],
+        'formatting_count': 0,
+        'has_hidden_content': False,
+        'text_issues': [],
+        'risk_score': 0.0,
+        'risk_flags': []
+    }
+
+    if not text:
+        return result
+
+    # 分析格式化实体
+    formatting_entities = []
+    for entity in entities:
+        entity_type = entity.get('type')
+        if entity_type in FORMATTING_ENTITY_TYPES:
+            formatting_entities.append(entity)
+            if entity_type not in result['formatting_types']:
+                result['formatting_types'].append(FORMATTING_ENTITY_TYPES[entity_type])
+
+            # 高风险格式化
+            if entity_type in HIGH_RISK_FORMATTING:
+                result['has_hidden_content'] = True
+                result['risk_flags'].append(f"使用{FORMATTING_ENTITY_TYPES[entity_type]}")
+
+    result['formatting_count'] = len(formatting_entities)
+    result['has_formatting'] = len(formatting_entities) > 0
+
+    # 计算格式化密度
+    if len(text) > 0 and formatting_entities:
+        formatted_chars = sum(e.get('length', 0) for e in formatting_entities)
+        formatting_density = formatted_chars / len(text)
+        if formatting_density > 0.5:
+            result['risk_flags'].append(f"格式化密度过高 ({formatting_density:.0%})")
+            result['risk_score'] += 0.2
+
+    # 分析特殊字符
+    text_analysis = _analyze_special_characters(text)
+    result['text_issues'].extend(text_analysis['issues'])
+    result['risk_score'] += text_analysis['risk_score']
+    result['risk_flags'].extend(text_analysis['risk_flags'])
+
+    # 多重格式化叠加（高风险）
+    if len(set(e.get('type') for e in formatting_entities)) >= 3:
+        result['risk_flags'].append("使用多种格式化叠加")
+        result['risk_score'] += 0.15
+
+    # 隐藏内容（极高风险）
+    if result['has_hidden_content']:
+        result['risk_score'] += 0.3
+
+    # 限制风险分数
+    result['risk_score'] = min(result['risk_score'], 1.0)
+
+    return result
+
+
+def _analyze_special_characters(text: str) -> Dict[str, Any]:
+    """
+    分析文本中的特殊字符（检测恶意字符）
+
+    Args:
+        text: 文本内容
+
+    Returns:
+        特殊字符分析结果
+    """
+    issues = []
+    risk_flags = []
+    risk_score = 0.0
+
+    stats = {
+        'zero_width_chars': 0,
+        'rtl_marks': 0,
+        'control_chars': 0,
+        'combining_chars': 0,
+        'special_symbols': 0
+    }
+
+    # 零宽字符检测（明显恶意）
+    zero_width_chars = ['\u200b', '\u200c', '\u200d', '\ufeff', '\u180e']
+    for char in zero_width_chars:
+        count = text.count(char)
+        stats['zero_width_chars'] += count
+
+    if stats['zero_width_chars'] > 0:
+        issues.append(f"包含 {stats['zero_width_chars']} 个零宽字符")
+        risk_flags.append("零宽字符隐藏")
+        risk_score += 0.4
+
+    # RTL（从右到左）标记检测（混淆攻击）
+    rtl_marks = ['\u202a', '\u202b', '\u202c', '\u202d', '\u202e']
+    for char in rtl_marks:
+        count = text.count(char)
+        stats['rtl_marks'] += count
+
+    if stats['rtl_marks'] > 0:
+        issues.append(f"包含 {stats['rtl_marks']} 个文本方向标记")
+        risk_flags.append("RTL方向混淆")
+        risk_score += 0.3
+
+    # 逐字符分析
+    for char in text:
+        category = unicodedata.category(char)
+
+        # 控制字符（除了正常空白）
+        if category[0] == 'C' and char not in [' ', '\n', '\t', '\r']:
+            stats['control_chars'] += 1
+
+        # 组合字符（变音符号等，用于文字特效）
+        if category[0] == 'M':
+            stats['combining_chars'] += 1
+
+    # 异常控制字符
+    if stats['control_chars'] > 5:
+        issues.append(f"包含 {stats['control_chars']} 个控制字符")
+        risk_flags.append("异常控制字符")
+        risk_score += 0.2
+
+    # 过多组合字符（文字特效滥用）
+    if stats['combining_chars'] > len(text) * 0.1:
+        issues.append(f"包含 {stats['combining_chars']} 个组合字符")
+        risk_flags.append("文字特效滥用")
+        risk_score += 0.2
+
+    # 特殊符号检测
+    special_symbols = re.findall(
+        r'[▪▫●○◆◇■□▲△▼▽★☆♠♣♥♦←→↑↓✓✗✘✔✕✖➤➥➔⇒⇐⇑⇓»«‹›【】《》〔〕〖〗『』「」]',
+        text
+    )
+    stats['special_symbols'] = len(special_symbols)
+
+    if stats['special_symbols'] > len(text) * 0.15:
+        issues.append(f"包含大量特殊符号 ({stats['special_symbols']} 个)")
+        risk_flags.append("特殊符号过多")
+        risk_score += 0.15
+
+    # 重复模式检测（刷屏）
+    repeated_patterns = re.findall(r'(.{1,3})\1{4,}', text)
+    if repeated_patterns:
+        unique_patterns = set(p for p in repeated_patterns if len(p.strip()) > 0)
+        if unique_patterns:
+            issues.append(f"包含重复模式")
+            risk_flags.append("重复模式刷屏")
+            risk_score += 0.1
+
+    return {
+        'issues': issues,
+        'risk_flags': risk_flags,
+        'risk_score': risk_score,
+        'stats': stats
+    }
+
+
+def _extract_quote_media(quote: Any) -> Optional[Dict[str, Any]]:
+    """
+    尝试从 ExternalReply quote 中提取媒体信息
+    
+    Args:
+        quote: ExternalReply.quote 对象
+    
+    Returns:
+        媒体信息字典，如果不存在媒体则返回 None
+    """
+    if not quote:
+        return None
+    
+    media_attributes = [
+        "photo", "video", "document", "audio", "voice", "animation",
+        "sticker", "video_note", "contact", "location"
+    ]
+    
+    # 模拟 Message 接口，复用 extract_media_info
+    class _QuoteWrapper:
+        def __init__(self, quote_obj: Any):
+            self.quote_obj = quote_obj
+        
+        def __getattr__(self, item: str) -> Any:
+            return getattr(self.quote_obj, item, None)
+    
+    has_media_attr = any(getattr(quote, attr, None) for attr in media_attributes)
+    if not has_media_attr:
+        return None
+    
+    try:
+        wrapper = _QuoteWrapper(quote)
+        media_info = extract_media_info(wrapper)  # type: ignore[arg-type]
+        if media_info.get("has_media"):
+            return media_info
+    except Exception as exc:
+        logger.debug(f"提取 quote 媒体信息失败: {exc}")
+    
+    return None

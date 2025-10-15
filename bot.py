@@ -4,6 +4,7 @@ Telegram 垃圾消息过滤机器人主程序
 import logging
 import sys
 import asyncio
+from pathlib import Path
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -18,10 +19,20 @@ from llm_api import llm_client
 from spam_detector import spam_detector
 
 # 配置日志
+log_handlers = [logging.StreamHandler(sys.stdout)]
+if config.LOG_FILE:
+    log_path = Path(config.LOG_FILE)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_handlers.append(logging.FileHandler(log_path, encoding="utf-8"))
+
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=getattr(logging, config.LOG_LEVEL)
+    level=getattr(logging, config.LOG_LEVEL),
+    handlers=log_handlers,
+    force=True
 )
+logging.getLogger("httpx").setLevel(logging.WARNING)  # Reduce noise from polling requests
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
@@ -98,6 +109,7 @@ async def handle_service_message(update: Update, context: ContextTypes.DEFAULT_T
         member_display_names = []
         for member in message.new_chat_members:
             display_name = getattr(member, "full_name", None) or member.username or member.first_name or "未知用户"
+            telegram_username = member.username or ""
             member_display_names.append(display_name)
             
             if member.id in config.ADMIN_USER_IDS or member.id in config.SYSTEM_USER_IDS:
@@ -110,8 +122,8 @@ async def handle_service_message(update: Update, context: ContextTypes.DEFAULT_T
             
             join_notice = message.text or f"{display_name} 加入群聊"
             username_result = await llm_client.analyze_username(
-                username=member.username or "",
-                full_name=getattr(member, "full_name", None) or "",
+                username=display_name,
+                full_name=telegram_username or "",
                 join_message=join_notice,
                 user_id=member.id
             )
@@ -161,6 +173,7 @@ async def handle_service_message(update: Update, context: ContextTypes.DEFAULT_T
             else:
                 logger.info(
                     f"✅ 用户名审核通过 - 用户: {display_name} (ID: {member.id}), "
+                    f"用户名: @{telegram_username or '无用户名'}, "
                     f"置信度: {username_result['confidence']:.2f}, 理由: {username_result['reason']}"
                 )
         
@@ -183,6 +196,50 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     try:
+        chat = message.chat
+        sender = message.from_user or message.sender_chat
+        sender_name = (
+            getattr(sender, "username", None)
+            or getattr(sender, "full_name", None)
+            or getattr(sender, "title", None)
+            or "未知用户"
+        )
+        sender_id = getattr(sender, "id", "N/A")
+        raw_content = (
+            message.text
+            or message.caption
+            or getattr(message, "poll", None) and "[投票]"
+            or getattr(message, "sticker", None) and "[贴纸]"
+            or getattr(message, "photo", None) and "[图片]"
+            or getattr(message, "video", None) and "[视频]"
+            or getattr(message, "document", None) and "[文件]"
+            or "[非文本消息]"
+        )
+        # Flatten whitespace to keep log lines compact
+        normalized_content = " ".join(str(raw_content).split())
+        truncated_content = (
+            normalized_content[:500] + "…" if len(normalized_content) > 500 else normalized_content
+        )
+        logger.info(
+            "📩 群消息 | 群组: %s (%s) | 用户: %s (%s) | 内容: %s",
+            chat.title or chat.id,
+            chat.id,
+            sender_name,
+            sender_id,
+            truncated_content
+        )
+
+        # 调试：打印消息中的链接预览和外部引用信息
+        if hasattr(message, 'link_preview_options') and message.link_preview_options:
+            logger.debug(f"📎 链接预览选项: {message.link_preview_options}")
+        if hasattr(message, 'external_reply') and message.external_reply:
+            logger.debug(f"💬 外部引用: {message.external_reply}")
+            ext_reply = message.external_reply
+            if hasattr(ext_reply, 'chat') and ext_reply.chat:
+                logger.debug(f"   - 引用聊天: {ext_reply.chat.title} (ID: {ext_reply.chat.id})")
+            if hasattr(ext_reply, 'origin') and ext_reply.origin:
+                logger.debug(f"   - 引用来源: {type(ext_reply.origin).__name__}")
+        
         # 检测消息
         detection_result = await spam_detector.check_message(message)
         

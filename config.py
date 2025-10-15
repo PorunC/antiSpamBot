@@ -34,6 +34,7 @@ SYSTEM_USER_IDS = [777000, 1087968824]
 
 # 日志配置
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+LOG_FILE = os.getenv("LOG_FILE", "logs/bot.log")
 
 # LLM 提示词模板
 SPAM_DETECTION_PROMPT = """你是一个专业的垃圾消息检测助手。请分析以下消息内容，判断它是否为垃圾消息、广告或恶意内容。

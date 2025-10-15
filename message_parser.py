@@ -12,9 +12,11 @@ from message_parser_utils import (
     extract_media_info,
     extract_forward_info,
     extract_reply_info,
+    extract_external_reply_info,
     extract_buttons_info,
     extract_media_group_info,
-    categorize_links
+    categorize_links,
+    analyze_text_formatting
 )
 
 logger = logging.getLogger(__name__)
@@ -61,6 +63,9 @@ class MessageParser:
                 # 回复信息
                 "reply": extract_reply_info(message),
                 
+                # 外部引用信息（如引用频道消息）
+                "external_reply": extract_external_reply_info(message),
+                
                 # 按钮信息
                 "buttons": extract_buttons_info(message),
                 
@@ -87,9 +92,17 @@ class MessageParser:
                     "external_links": [],
                     "mentions": [],
                     "hashtags": [],
-                    "bot_commands": []
+                    "bot_commands": [],
+                    "embedded_channel_links": []
                 }
-            
+
+            # 文本格式化分析（检测恶意格式化）
+            message_text = message.text or message.caption or ""
+            parsed_data["text_formatting"] = analyze_text_formatting(
+                message_text,
+                parsed_data["entities"]
+            )
+
             logger.debug(f"消息解析完成 - ID: {message.message_id}")
             return parsed_data
             
@@ -211,14 +224,103 @@ class MessageParser:
             
             parts.append("\n".join(reply_parts))
         
+        # 外部引用消息（如引用频道或其他群组的消息）
+        external_reply = parsed_message.get("external_reply")
+        if external_reply and external_reply.get("is_external_reply"):
+            ext_parts = ["【⚠️ 嵌入外部消息】"]
+            
+            chat_info = external_reply.get("chat") or {}
+            if chat_info.get("id"):
+                chat_type_map = {
+                    "channel": "频道",
+                    "supergroup": "群组",
+                    "group": "群组",
+                    "private": "私聊"
+                }
+                chat_type = chat_type_map.get(chat_info.get("type"), chat_info.get("type") or "聊天")
+                chat_name = chat_info.get("title") or chat_info.get("username") or str(chat_info.get("id"))
+                chat_username = f"@{chat_info['username']}" if chat_info.get("username") else f"ID: {chat_info.get('id')}"
+                ext_parts.append(f"引用自{chat_type}: {chat_name} ({chat_username})")
+            else:
+                ext_parts.append("引用自未知聊天")
+            
+            origin_info = external_reply.get("origin") or {}
+            if origin_info.get("type"):
+                ext_parts.append(f"引用来源类型: {origin_info['type']}")
+                if origin_info.get("sender_user"):
+                    sender_user = origin_info["sender_user"]
+                    ext_parts.append(f"来源用户: {sender_user.get('full_name', '未知')} (@{sender_user.get('username') or '无'})")
+                if origin_info.get("sender_chat"):
+                    sender_chat = origin_info["sender_chat"]
+                    chat_type = "频道" if sender_chat.get("type") == "channel" else "群组"
+                    ext_parts.append(f"来源聊天: {sender_chat.get('title', '未知')} ({chat_type})")
+            
+            external_text = external_reply.get("text")
+            if external_text:
+                if len(external_text) > 300:
+                    external_text = external_text[:300] + "..."
+                ext_parts.append(f"引用消息文本:\n{external_text}")
+            
+            external_caption = external_reply.get("caption")
+            if external_caption:
+                if len(external_caption) > 300:
+                    external_caption = external_caption[:300] + "..."
+                ext_parts.append(f"引用媒体说明:\n{external_caption}")
+            
+            ext_links = external_reply.get("categorized_links", {})
+            if ext_links.get("telegram_links"):
+                ext_parts.append(
+                    "引用消息包含 Telegram 链接:\n" +
+                    "\n".join(f"- {link}" for link in ext_links["telegram_links"])
+                )
+            if ext_links.get("external_links"):
+                ext_parts.append(
+                    "引用消息包含外部链接:\n" +
+                    "\n".join(f"- {link}" for link in ext_links["external_links"])
+                )
+            if ext_links.get("mentions"):
+                ext_parts.append("引用消息提及用户: " + ", ".join(ext_links["mentions"]))
+            if ext_links.get("hashtags"):
+                ext_parts.append("引用消息包含话题: " + ", ".join(ext_links["hashtags"]))
+            
+            external_media = external_reply.get("media", {})
+            if external_media.get("has_media"):
+                media_types = ", ".join(external_media.get("media_types", []))
+                ext_parts.append(f"引用消息包含媒体: {media_types}")
+            
+            quote_info = external_reply.get("quote")
+            if quote_info:
+                quote_text = quote_info.get("text")
+                if quote_text:
+                    truncated_quote = quote_text if len(quote_text) <= 300 else quote_text[:300] + "..."
+                    ext_parts.append(f"引用片段:\n{truncated_quote}")
+                quote_media = quote_info.get("media", {})
+                if quote_media.get("has_media"):
+                    media_types = ", ".join(quote_media.get("media_types", []))
+                    ext_parts.append(f"引用片段媒体: {media_types}")
+            
+            parts.append("\n".join(ext_parts))
+        
         # 链接信息（重点关注）
         categorized_links = parsed_message.get("categorized_links", {})
-        
+
+        # 嵌入的频道消息链接（极高风险 - 会显示频道预览，诱导用户点击）
+        embedded_channel_links = categorized_links.get("embedded_channel_links", [])
+        if embedded_channel_links:
+            parts.append(
+                f"【🚨 嵌入频道消息预览】\n"
+                f"消息包含 {len(embedded_channel_links)} 个频道消息链接，会显示嵌入预览诱导点击:\n" +
+                "\n".join(f"- {link}" for link in embedded_channel_links)
+            )
+
         # Telegram 链接（高风险）
         telegram_links = categorized_links.get("telegram_links", [])
         if telegram_links:
-            parts.append(f"【⚠️ Telegram 频道/群组链接】\n" + "\n".join(f"- {link}" for link in telegram_links))
-        
+            # 过滤掉已经在嵌入链接中显示的
+            non_embedded_tg_links = [link for link in telegram_links if link not in embedded_channel_links]
+            if non_embedded_tg_links:
+                parts.append(f"【⚠️ Telegram 频道/群组链接】\n" + "\n".join(f"- {link}" for link in non_embedded_tg_links))
+
         # 外部链接
         external_links = categorized_links.get("external_links", [])
         if external_links:
@@ -228,6 +330,28 @@ class MessageParser:
         mentions = categorized_links.get("mentions", [])
         if mentions:
             parts.append(f"【提及用户】\n" + ", ".join(mentions))
+
+        # 文本格式化分析（检测恶意格式化和特殊字符）
+        text_formatting = parsed_message.get("text_formatting", {})
+        if text_formatting.get("has_formatting") or text_formatting.get("text_issues"):
+            format_parts = ["【⚠️ 文本格式化分析】"]
+
+            if text_formatting.get("has_formatting"):
+                format_types = ", ".join(text_formatting.get("formatting_types", []))
+                format_parts.append(f"使用格式化: {format_types}")
+
+            if text_formatting.get("has_hidden_content"):
+                format_parts.append("⚠️ 包含隐藏内容（隐藏链接/剧透等）")
+
+            if text_formatting.get("text_issues"):
+                format_parts.append("文本问题:")
+                for issue in text_formatting["text_issues"]:
+                    format_parts.append(f"  - {issue}")
+
+            if text_formatting.get("risk_flags"):
+                format_parts.append(f"风险标识: {', '.join(text_formatting['risk_flags'])}")
+
+            parts.append("\n".join(format_parts))
         
         # 标签
         hashtags = categorized_links.get("hashtags", [])
@@ -308,6 +432,7 @@ class MessageParser:
             "has_contact_info": False,
             "has_buttons": False,
             "is_media_group": False,
+            "has_external_reply": False,
             "has_multiple_risks": False,
             "risk_score": 0.0,
             "risk_flags": []
@@ -321,12 +446,20 @@ class MessageParser:
                 risk_indicators["risk_score"] += 0.4
                 risk_indicators["risk_flags"].append("频道转发")
         
-        # 检查 Telegram 链接（高风险）
+        # 检查嵌入的频道消息链接（极高风险）
+        embedded_channel_links = parsed_message.get("categorized_links", {}).get("embedded_channel_links", [])
+        if embedded_channel_links:
+            risk_indicators["has_telegram_links"] = True
+            risk_indicators["risk_score"] += 0.5  # 嵌入频道链接风险更高
+            risk_indicators["risk_flags"].append(f"{len(embedded_channel_links)}个嵌入频道消息预览")
+
+        # 检查普通 Telegram 链接（高风险）
         telegram_links = parsed_message.get("categorized_links", {}).get("telegram_links", [])
-        if telegram_links:
+        non_embedded_tg_links = [link for link in telegram_links if link not in embedded_channel_links]
+        if non_embedded_tg_links:
             risk_indicators["has_telegram_links"] = True
             risk_indicators["risk_score"] += 0.3
-            risk_indicators["risk_flags"].append(f"{len(telegram_links)}个Telegram链接")
+            risk_indicators["risk_flags"].append(f"{len(non_embedded_tg_links)}个Telegram链接")
         
         # 检查外部链接
         external_links = parsed_message.get("categorized_links", {}).get("external_links", [])
@@ -348,28 +481,69 @@ class MessageParser:
             risk_indicators["risk_score"] += 0.2
             risk_indicators["risk_flags"].append("包含按钮")
         
+        # 检查外部引用消息（如引用频道内容）
+        external_reply = parsed_message.get("external_reply")
+        if external_reply and external_reply.get("is_external_reply"):
+            risk_indicators["has_external_reply"] = True
+            risk_indicators["risk_score"] += 0.2
+            risk_indicators["risk_flags"].append("引用外部消息")
+            
+            chat_info = external_reply.get("chat") or {}
+            if chat_info.get("type") == "channel":
+                risk_indicators["risk_score"] += 0.2
+                risk_indicators["risk_flags"].append("引用频道消息")
+            
+            ext_links = external_reply.get("categorized_links", {})
+            telegram_links = ext_links.get("telegram_links", [])
+            if telegram_links:
+                risk_indicators["has_telegram_links"] = True
+                risk_indicators["risk_score"] += 0.2
+                risk_indicators["risk_flags"].append(f"引用消息含{len(telegram_links)}个Telegram链接")
+            external_links = ext_links.get("external_links", [])
+            if external_links:
+                risk_indicators["has_external_links"] = True
+                risk_indicators["risk_score"] += 0.1 * min(len(external_links), 3)
+                risk_indicators["risk_flags"].append(f"引用消息含{len(external_links)}个外部链接")
+        
         # 检查媒体组
         if parsed_message.get("media_group"):
             risk_indicators["is_media_group"] = True
             risk_indicators["risk_score"] += 0.1
             risk_indicators["risk_flags"].append("媒体组")
-        
+
+        # 检查文本格式化和特殊字符（新增）
+        text_formatting = parsed_message.get("text_formatting", {})
+        if text_formatting.get("risk_score", 0) > 0:
+            formatting_risk = text_formatting["risk_score"]
+            risk_indicators["risk_score"] += formatting_risk
+
+            # 添加格式化相关的风险标识
+            if text_formatting.get("has_hidden_content"):
+                risk_indicators["risk_flags"].append("隐藏内容格式化")
+
+            if text_formatting.get("risk_flags"):
+                # 只添加最重要的几个标识
+                for flag in text_formatting["risk_flags"][:2]:
+                    risk_indicators["risk_flags"].append(flag)
+
         # 判断是否有多个风险因素
         risk_count = sum([
             risk_indicators["has_channel_forward"],
             risk_indicators["has_telegram_links"],
             risk_indicators["has_external_links"],
             risk_indicators["has_contact_info"],
-            risk_indicators["has_buttons"]
+            risk_indicators["has_buttons"],
+            risk_indicators["has_external_reply"],
+            text_formatting.get("has_hidden_content", False)  # 新增
         ])
-        
+
         if risk_count >= 2:
             risk_indicators["has_multiple_risks"] = True
             risk_indicators["risk_score"] += 0.2
-        
+
         # 限制风险分数在 0-1 之间
         risk_indicators["risk_score"] = min(risk_indicators["risk_score"], 1.0)
-        
+
         return risk_indicators
     
     def _get_minimal_parsed_data(self, message: Message) -> Dict[str, Any]:
