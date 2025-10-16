@@ -122,8 +122,8 @@ async def handle_service_message(update: Update, context: ContextTypes.DEFAULT_T
             
             join_notice = message.text or f"{display_name} 加入群聊"
             username_result = await llm_client.analyze_username(
-                username=display_name,
-                full_name=telegram_username or "",
+                username=telegram_username or "",
+                full_name=display_name,
                 join_message=join_notice,
                 user_id=member.id
             )
