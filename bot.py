@@ -162,7 +162,7 @@ async def handle_service_message(update: Update, context: ContextTypes.DEFAULT_T
                     if context.application.job_queue:
                         context.application.job_queue.run_once(
                             delete_notification,
-                            when=10,
+                            when=3,
                             data={
                                 'chat_id': message.chat_id,
                                 'message_id': notification.message_id
@@ -383,17 +383,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"💬 理由: {result['reason']}"
                 )
                 
-                # 发送通知并在 10 秒后自动删除
+                # 发送通知并在 3 秒后自动删除
                 notification = await context.bot.send_message(
                     chat_id=message.chat_id,
                     text=notification_text
                 )
                 
-                # 10 秒后删除通知消息（如果 JobQueue 可用）
+                # 3 秒后删除通知消息（如果 JobQueue 可用）
                 if context.application.job_queue:
                     context.application.job_queue.run_once(
                         delete_notification,
-                        when=10,
+                        when=3,
                         data={
                             'chat_id': message.chat_id,
                             'message_id': notification.message_id
