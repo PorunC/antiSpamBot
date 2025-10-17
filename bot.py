@@ -1,10 +1,12 @@
 """
 Telegram 垃圾消息过滤机器人主程序
 """
+import re
 import logging
 import sys
 import asyncio
 from pathlib import Path
+from typing import Optional
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -34,6 +36,22 @@ logging.basicConfig(
 logging.getLogger("httpx").setLevel(logging.WARNING)  # Reduce noise from polling requests
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
+
+COMPILED_USERNAME_BLACKLIST_PATTERNS = [
+    (re.compile(entry["pattern"], re.IGNORECASE), entry["reason"])
+    for entry in getattr(config, "USERNAME_BLACKLIST_PATTERNS", [])
+]
+
+
+def check_username_blacklist(username: str) -> Optional[str]:
+    """Return blacklist match reason if username hits a local rule."""
+    if not username:
+        return None
+    normalized = username.lstrip("@")
+    for pattern, reason in COMPILED_USERNAME_BLACKLIST_PATTERNS:
+        if pattern.match(normalized):
+            return reason
+    return None
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -118,6 +136,45 @@ async def handle_service_message(update: Update, context: ContextTypes.DEFAULT_T
             
             if member.is_bot:
                 logger.debug(f"跳过用户名审核（机器人）- 用户: {display_name} (ID: {member.id})")
+                continue
+
+            blacklist_reason = check_username_blacklist(telegram_username or "")
+            if blacklist_reason:
+                logger.warning(
+                    f"检测到本地黑名单用户名 - 用户: {display_name} (ID: {member.id}), "
+                    f"用户名: @{telegram_username or '无用户名'}, 理由: {blacklist_reason}"
+                )
+                try:
+                    await context.bot.ban_chat_member(
+                        chat_id=message.chat_id,
+                        user_id=member.id
+                    )
+                    logger.info(f"已移除黑名单用户名用户 - {display_name} (ID: {member.id})")
+
+                    notification_lines = [
+                        "🚫 检测到黑名单用户名并已移除",
+                        f"👤 用户: {display_name}",
+                        f"🆔 ID: {member.id}",
+                        f"📛 用户名: @{telegram_username or '无用户名'}",
+                        "📊 置信度: 100%",
+                        f"💬 理由: {blacklist_reason}"
+                    ]
+                    notification = await context.bot.send_message(
+                        chat_id=message.chat_id,
+                        text="\n".join(notification_lines)
+                    )
+
+                    if context.application.job_queue:
+                        context.application.job_queue.run_once(
+                            delete_notification,
+                            when=3,
+                            data={
+                                'chat_id': message.chat_id,
+                                'message_id': notification.message_id
+                            }
+                        )
+                except TelegramError as e:
+                    logger.error(f"移除黑名单用户名用户失败: {e}")
                 continue
             
             join_notice = message.text or f"{display_name} 加入群聊"

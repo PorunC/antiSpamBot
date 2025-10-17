@@ -22,6 +22,24 @@ LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
 # 垃圾消息检测配置
 CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", "0.7"))
 USERNAME_CONFIDENCE_THRESHOLD = float(os.getenv("USERNAME_CONFIDENCE_THRESHOLD", "0.75"))
+USERNAME_BLACKLIST_PATTERNS = [
+    {
+        "pattern": r"^toom[a-z0-9]{4,}$",
+        "reason": "用户名匹配黑名单特征：TOOM + 随机字符"
+    },
+    {
+        "pattern": r"^tool[a-z0-9]{4,}$",
+        "reason": "用户名匹配黑名单特征：TOOL + 随机字符"
+    },
+    {
+        "pattern": r"^poij[a-z0-9]{4,}$",
+        "reason": "用户名匹配黑名单特征：poij + 随机字符"
+    },
+    {
+        "pattern": r"^(?:spspring|sppring)[a-z0-9]*$",
+        "reason": "用户名匹配黑名单特征：SpSpring/Sppring + 随机字符"
+    }
+]
 
 # 管理员用户 ID（不会被踢出）
 ADMIN_USER_IDS_STR = os.getenv("ADMIN_USER_IDS", "")
