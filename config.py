@@ -183,10 +183,10 @@ USERNAME_CHECK_PROMPT = """你是一个群组安全审核助手。请根据用�
 
 7. 用户名是否符合已有黑名单的格式特征中
     已有黑名单
-    - @TOOM1456、@TOOM1390 特征为 TOOM + 4位数字或者 TOOM + 一些随机字符
-    - @TOOL1234、@TOOLx123xxx 特征为 TOOL + 一些随机字符
-    - @poijd20J、@poijab12 特征为 poij + 一些随机字符
-    - @SpSpringabcd、@SpSpringabcd1234 特征为 SpSpring + 一些随机字符
+    - TOOM1456、TOOM1390 特征为 TOOM + 4位数字或者 TOOM + 一些随机字符
+    - TOOL1234、TOOLx123xxx 特征为 TOOL + 一些随机字符
+    - poijd20J、poijab12 特征为 poij + 一些随机字符
+    - SpSpringabcd、SpSpringabcd1234 特征为 SpSpring + 一些随机字符
     
 请仅依据用户名和显示名称进行判断，不要猜测其他信息。
 
