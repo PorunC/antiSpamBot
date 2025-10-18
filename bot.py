@@ -6,10 +6,10 @@ import logging
 import sys
 import asyncio
 import json
-from datetime import time
+from datetime import time, datetime
 from pathlib import Path
 from typing import Optional, Dict, Any
-from telegram import Update
+from telegram import Update, BotCommand
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -21,7 +21,7 @@ from telegram.error import TelegramError
 import config
 from llm_api import llm_client
 from spam_detector import spam_detector
-from log_analyzer import get_recent_ban_stats, BEIJING_TZ
+from log_analyzer import get_recent_ban_stats, get_total_log_stats, BEIJING_TZ
 
 # 配置日志
 log_handlers = [logging.StreamHandler(sys.stdout)]
@@ -132,6 +132,23 @@ def log_ban_event(
     logger.info("BAN_EVENT %s", payload)
 
 
+async def setup_bot_commands(application: Application) -> None:
+    """配置机器人命令菜单，让客户端显示命令按钮。"""
+    command_list = [
+        BotCommand("start", "启动机器人"),
+        BotCommand("help", "显示帮助信息"),
+        BotCommand("status", "查看机器人状态"),
+        BotCommand("banstats", "查看封禁统计"),
+        BotCommand("logstats", "查看日志统计"),
+    ]
+
+    try:
+        await application.bot.set_my_commands(command_list)
+        logger.info("已更新机器人命令列表")
+    except TelegramError as exc:
+        logger.error("设置机器人命令列表失败: %s", exc)
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理 /start 命令"""
     await update.message.reply_text(
@@ -155,6 +172,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /start - 启动机器人
 /help - 显示此帮助信息
 /status - 查看机器人状态
+/logstats - 查看日志统计（管理员）
 
 **注意事项：**
 1. 机器人需要群组管理员权限才能删除消息和踢出用户
@@ -805,6 +823,55 @@ async def ban_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await message.reply_text(report_text)
 
 
+async def log_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """统计日志中的封禁账号数量和垃圾消息数量。"""
+    message = update.effective_message
+    user = update.effective_user
+
+    if not message:
+        logger.debug("日志统计命令缺少消息内容: %s", update)
+        return
+
+    user_id = getattr(user, "id", None)
+    if user_id not in config.ADMIN_USER_IDS:
+        await message.reply_text("❌ 您没有权限执行此命令。")
+        return
+
+    stats = get_total_log_stats()
+    log_path = stats.get("log_path")
+
+    if not stats.get("log_exists"):
+        await message.reply_text(f"⚠️ 未找到日志文件: {log_path}")
+        return
+
+    def format_time(value: Optional[datetime]) -> str:
+        if not value:
+            return "无记录"
+        try:
+            return value.astimezone(BEIJING_TZ).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            return value.strftime("%Y-%m-%d %H:%M")
+
+    ban_range = "无记录"
+    if stats.get("total_ban_events", 0):
+        ban_range = f"{format_time(stats.get('earliest_ban_time'))} ~ {format_time(stats.get('latest_ban_time'))}"
+
+    spam_range = "无记录"
+    if stats.get("total_spam_messages", 0):
+        spam_range = f"{format_time(stats.get('earliest_spam_time'))} ~ {format_time(stats.get('latest_spam_time'))}"
+
+    reply_text = (
+        "📊 **日志统计概览**\n"
+        f"🗂️ 日志文件: `{log_path}`\n"
+        f"🚫 封禁记录: {stats.get('total_ban_events', 0)} 条（唯一账号 {stats.get('unique_banned_accounts', 0)} 个）\n"
+        f"🚨 垃圾消息: {stats.get('total_spam_messages', 0)} 条\n"
+        f"🕰️ 封禁时间范围: {ban_range}\n"
+        f"🕰️ 垃圾消息时间范围: {spam_range}"
+    )
+
+    await message.reply_text(reply_text, parse_mode="Markdown")
+
+
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理错误"""
     logger.error(f"更新 {update} 导致错误: {context.error}", exc_info=context.error)
@@ -819,7 +886,11 @@ def main():
         logger.info("正在启动 Telegram 垃圾消息过滤机器人...")
         
         # 创建应用构建器
-        app_builder = Application.builder().token(config.TELEGRAM_BOT_TOKEN)
+        app_builder = (
+            Application.builder()
+            .token(config.TELEGRAM_BOT_TOKEN)
+            .post_init(setup_bot_commands)
+        )
         
         # 如果配置了代理，则使用代理
         if config.PROXY_URL:
@@ -839,6 +910,7 @@ def main():
         application.add_handler(CommandHandler("help", help_command))
         application.add_handler(CommandHandler("status", status_command))
         application.add_handler(CommandHandler(["banstats", "banreport"], ban_report_command))
+        application.add_handler(CommandHandler("logstats", log_stats_command))
         
         # 添加系统服务消息处理器（优先级最高，处理用户离开/加入的系统消息）
         application.add_handler(

@@ -33,6 +33,7 @@ BAN_LOG_PATTERN_LEGACY = re.compile(
         r"已封禁用户 - (?P<username>.+?) \(ID: (?P<user_id>\d+)\)"
     )
 )
+SPAM_DETECTION_PATTERN = re.compile(r"检测到垃圾消息 - 用户:")
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S,%f"
 BAN_EVENT_MARKER = "BAN_EVENT"
 if ZoneInfo is not None:
@@ -271,3 +272,98 @@ def _collect_recent_ban_entries(window_hours: int = 24):
 
     entries.sort(key=lambda entry: entry["timestamp"])
     return entries, window_start, now
+
+
+def get_total_log_stats() -> Dict[str, object]:
+    """
+    统计日志中累计的封禁账号和垃圾消息数量。
+
+    返回结构:
+    {
+        "log_path": Path,  # 日志文件路径
+        "log_exists": bool,  # 日志文件是否存在
+        "total_ban_events": int,  # 封禁记录条数
+        "unique_banned_accounts": int,  # 唯一封禁账号数量
+        "total_spam_messages": int,  # 检测到的垃圾消息数量
+        "earliest_ban_time": Optional[datetime],  # 最早的封禁时间
+        "latest_ban_time": Optional[datetime],  # 最近的封禁时间
+        "earliest_spam_time": Optional[datetime],  # 最早的垃圾消息时间
+        "latest_spam_time": Optional[datetime],  # 最近的垃圾消息时间
+    }
+    """
+    log_path = Path(config.LOG_FILE)
+    result: Dict[str, object] = {
+        "log_path": log_path,
+        "log_exists": log_path.exists(),
+        "total_ban_events": 0,
+        "unique_banned_accounts": 0,
+        "total_spam_messages": 0,
+        "earliest_ban_time": None,
+        "latest_ban_time": None,
+        "earliest_spam_time": None,
+        "latest_spam_time": None,
+    }
+
+    if not log_path.exists():
+        logger.debug("日志文件不存在，无法统计累计封禁数据: %s", log_path)
+        return result
+
+    structured_entries: List[Dict[str, Any]] = []
+    legacy_entries: List[Dict[str, Any]] = []
+    spam_count = 0
+    earliest_spam: Optional[datetime] = None
+    latest_spam: Optional[datetime] = None
+
+    try:
+        with log_path.open("r", encoding="utf-8") as log_file:
+            for line in log_file:
+                if BAN_EVENT_MARKER in line:
+                    entry = _parse_ban_event_line(line)
+                    if entry:
+                        structured_entries.append(entry)
+                    continue
+
+                legacy_entry = _parse_legacy_ban_line(line)
+                if legacy_entry:
+                    legacy_entries.append(legacy_entry)
+
+                if SPAM_DETECTION_PATTERN.search(line):
+                    spam_count += 1
+                    timestamp_str = line.split(" - ", 1)[0].strip()
+                    spam_time = _parse_timestamp(timestamp_str)
+                    if spam_time:
+                        if earliest_spam is None or spam_time < earliest_spam:
+                            earliest_spam = spam_time
+                        if latest_spam is None or spam_time > latest_spam:
+                            latest_spam = spam_time
+    except OSError as exc:
+        logger.error("读取日志文件失败: %s", exc)
+        return result
+
+    ban_entries = structured_entries if structured_entries else legacy_entries
+    if ban_entries:
+        unique_accounts = {
+            entry["user_id"]
+            for entry in ban_entries
+            if entry.get("user_id")
+        }
+        timestamps = [entry["timestamp"] for entry in ban_entries if entry.get("timestamp")]
+
+        result.update(
+            {
+                "total_ban_events": len(ban_entries),
+                "unique_banned_accounts": len(unique_accounts),
+                "earliest_ban_time": min(timestamps) if timestamps else None,
+                "latest_ban_time": max(timestamps) if timestamps else None,
+            }
+        )
+
+    result.update(
+        {
+            "total_spam_messages": spam_count,
+            "earliest_spam_time": earliest_spam,
+            "latest_spam_time": latest_spam,
+        }
+    )
+
+    return result
