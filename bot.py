@@ -7,7 +7,7 @@ import sys
 import asyncio
 from datetime import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Any
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -561,23 +561,20 @@ async def delete_notification(context: ContextTypes.DEFAULT_TYPE):
         logger.warning(f"删除通知消息失败: {e}")
 
 
-async def send_daily_ban_report(context: ContextTypes.DEFAULT_TYPE):
-    """每日封禁统计报告，发送给管理员用户并保留消息。"""
-    stats = get_recent_ban_stats(window_hours=24)
-    stats_by_chat = stats.get("by_chat", {})
-    since = stats["since"]
-    until = stats["until"]
+def _format_ban_report(stats: Dict[str, Any]) -> Optional[str]:
+    """根据封禁统计构建报告文本。"""
     total = stats.get("total", 0)
     unique_accounts = stats.get("unique_accounts", 0)
+    stats_by_chat = stats.get("by_chat", {})
+    since = stats.get("since")
+    until = stats.get("until")
 
-    if total == 0:
-        logger.debug("最近 24 小时没有封禁记录，跳过封禁统计报告发送")
-        return
+    if not total:
+        return None
 
-    target_user_ids = sorted(set(config.ADMIN_USER_IDS))
-    if not target_user_ids:
-        logger.warning("未配置管理员用户 ID，封禁统计报告无法发送")
-        return
+    if not since or not until:
+        logger.warning("封禁统计缺少时间范围信息，无法构建报告")
+        return None
 
     header_lines = [
         "📊 垃圾账号封禁统计",
@@ -603,9 +600,15 @@ async def send_daily_ban_report(context: ContextTypes.DEFAULT_TYPE):
             if entries:
                 section_lines.append("最近记录（最多展示 5 条）:")
                 for entry in entries[-5:]:
+                    timestamp = entry.get("timestamp")
+                    username = entry.get("username", "未知用户")
+                    user_id = entry.get("user_id", "未知 ID")
+                    if timestamp:
+                        time_str = timestamp.strftime('%m-%d %H:%M')
+                    else:
+                        time_str = "未知时间"
                     section_lines.append(
-                        f"- {entry['timestamp'].strftime('%m-%d %H:%M')} | "
-                        f"{entry['username']} (ID: {entry['user_id']})"
+                        f"- {time_str} | {username} (ID: {user_id})"
                     )
 
             sections.append("\n".join(section_lines))
@@ -614,7 +617,22 @@ async def send_daily_ban_report(context: ContextTypes.DEFAULT_TYPE):
 
     report_parts = ["\n".join(header_lines)]
     report_parts.extend(sections)
-    report_text = "\n\n".join(report_parts)
+    return "\n\n".join(report_parts)
+
+
+async def send_daily_ban_report(context: ContextTypes.DEFAULT_TYPE):
+    """每日封禁统计报告，发送给管理员用户并保留消息。"""
+    stats = get_recent_ban_stats(window_hours=24)
+    report_text = _format_ban_report(stats)
+
+    if not report_text:
+        logger.debug("最近 24 小时没有封禁记录，跳过封禁统计报告发送")
+        return
+
+    target_user_ids = sorted(set(config.ADMIN_USER_IDS))
+    if not target_user_ids:
+        logger.warning("未配置管理员用户 ID，封禁统计报告无法发送")
+        return
 
     for user_id in target_user_ids:
         try:
@@ -624,6 +642,30 @@ async def send_daily_ban_report(context: ContextTypes.DEFAULT_TYPE):
             )
         except TelegramError as exc:
             logger.error(f"发送封禁统计报告失败 (user_id={user_id}): {exc}")
+
+
+async def ban_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """命令触发的封禁统计报告。"""
+    message = update.effective_message
+    user = update.effective_user
+
+    if not message:
+        logger.debug("封禁统计命令缺少消息内容: %s", update)
+        return
+
+    user_id = getattr(user, "id", None)
+    if user_id not in config.ADMIN_USER_IDS:
+        await message.reply_text("❌ 您没有权限执行此命令。")
+        return
+
+    stats = get_recent_ban_stats(window_hours=24)
+    report_text = _format_ban_report(stats)
+
+    if not report_text:
+        await message.reply_text("✅ 最近 24 小时未封禁新的垃圾账号。")
+        return
+
+    await message.reply_text(report_text)
 
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -659,6 +701,7 @@ def main():
         application.add_handler(CommandHandler("start", start_command))
         application.add_handler(CommandHandler("help", help_command))
         application.add_handler(CommandHandler("status", status_command))
+        application.add_handler(CommandHandler(["banstats", "banreport"], ban_report_command))
         
         # 添加系统服务消息处理器（优先级最高，处理用户离开/加入的系统消息）
         application.add_handler(
