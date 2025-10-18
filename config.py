@@ -40,6 +40,12 @@ USERNAME_BLACKLIST_PATTERNS = [
         "reason": "用户名匹配黑名单特征：SpSpring/Sppring + 随机字符"
     }
 ]
+DISPLAY_NAME_BLACKLIST_PATTERNS = [
+    {
+        "pattern": r"[\u0600-\u06FF]",
+        "reason": "显示名称包含波斯语字符，命中黑名单策略"
+    }
+]
 
 # 管理员用户 ID（不会被踢出）
 ADMIN_USER_IDS_STR = os.getenv("ADMIN_USER_IDS", "")
