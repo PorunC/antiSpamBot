@@ -36,6 +36,10 @@ USERNAME_BLACKLIST_PATTERNS = [
         "reason": "用户名匹配黑名单特征：poij + 随机字符"
     },
     {
+        "pattern": r"^pjdk[a-z0-9]{4,}$",
+        "reason": "用户名匹配黑名单特征：pjdk + 随机字符"
+    },
+    {
         "pattern": r"^(?:spspring|sppring)[a-z0-9]*$",
         "reason": "用户名匹配黑名单特征：SpSpring/Sppring + 随机字符"
     }
