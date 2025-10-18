@@ -54,7 +54,7 @@ CATEGORY_LABELS = {
     "display_name_blacklist": "本地黑名单昵称",
     "username_llm_violation": "AI 判定违规用户名",
     "message_violation": "垃圾消息",
-    "legacy_message_violation": "垃圾消息（旧日志）",
+    "legacy_message_violation": "垃圾消息",
     "spam": "垃圾消息",
     "ad": "广告消息",
     "promotion": "引流推广消息",
@@ -743,17 +743,9 @@ def _format_ban_report(stats: Dict[str, Any]) -> Optional[str]:
                 for entry in entries[-5:]:
                     timestamp = entry.get("timestamp")
                     username = entry.get("username") or "未知用户"
-                    user_id = entry.get("user_id") or "未知 ID"
-                    time_str = timestamp.strftime('%m-%d %H:%M') if timestamp else "未知时间"
+                    time_str = timestamp.strftime("%m-%d %H:%M") if timestamp else "未知时间"
                     category_label = describe_ban_category(entry.get("category"))
-                    line = f"- {time_str} | {username} (ID: {user_id}) | {category_label}"
-                    reason = entry.get("reason")
-                    if reason:
-                        reason_text = str(reason)
-                        if len(reason_text) > 60:
-                            reason_text = reason_text[:57] + "…"
-                        line += f" | 理由: {reason_text}"
-                    section_lines.append(line)
+                    section_lines.append(f"- {time_str} | {username} | {category_label}")
 
             sections.append("\n".join(section_lines))
     else:
