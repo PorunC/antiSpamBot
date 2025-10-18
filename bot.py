@@ -5,6 +5,7 @@ import re
 import logging
 import sys
 import asyncio
+import json
 from datetime import time
 from pathlib import Path
 from typing import Optional, Dict, Any
@@ -48,6 +49,31 @@ COMPILED_DISPLAY_NAME_BLACKLIST_PATTERNS = [
     for entry in getattr(config, "DISPLAY_NAME_BLACKLIST_PATTERNS", [])
 ]
 
+CATEGORY_LABELS = {
+    "username_blacklist": "本地黑名单用户名",
+    "display_name_blacklist": "本地黑名单昵称",
+    "username_llm_violation": "AI 判定违规用户名",
+    "message_violation": "垃圾消息",
+    "legacy_message_violation": "垃圾消息（旧日志）",
+    "spam": "垃圾消息",
+    "ad": "广告消息",
+    "promotion": "引流推广消息",
+    "scam": "诈骗/钓鱼消息",
+    "other": "其他违规消息",
+}
+
+
+def describe_ban_category(category: Optional[str]) -> str:
+    """将封禁类别转换为更易读的描述。"""
+    if not category:
+        return "未分类"
+    if not isinstance(category, str):
+        category = str(category)
+    lookup_key = category.lower()
+    if lookup_key in CATEGORY_LABELS:
+        return CATEGORY_LABELS[lookup_key]
+    return CATEGORY_LABELS.get(category, category)
+
 
 def check_username_blacklist(username: str) -> Optional[str]:
     """Return blacklist match reason if username hits a local rule."""
@@ -68,6 +94,42 @@ def check_display_name_blacklist(display_name: str) -> Optional[str]:
         if pattern.search(display_name):
             return reason
     return None
+
+
+def log_ban_event(
+    category: str,
+    chat,
+    user,
+    reason: str,
+    confidence: Optional[float] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> None:
+    """记录统一的封禁事件日志，便于后续统计分析。"""
+    event: Dict[str, Any] = {
+        "category": category,
+        "chat_id": getattr(chat, "id", None),
+        "chat_title": getattr(chat, "title", None)
+        or getattr(chat, "full_name", None)
+        or getattr(chat, "first_name", None),
+        "user_id": getattr(user, "id", None),
+        "username": getattr(user, "username", None),
+        "full_name": getattr(user, "full_name", None)
+        or getattr(user, "name", None)
+        or getattr(user, "first_name", None),
+        "reason": reason,
+    }
+    if confidence is not None:
+        event["confidence"] = confidence
+    if extra:
+        event["extra"] = extra
+
+    try:
+        payload = json.dumps(event, ensure_ascii=False, default=str)
+    except (TypeError, ValueError) as exc:
+        logger.warning("封禁事件序列化失败: %s", exc)
+        payload = str(event)
+
+    logger.info("BAN_EVENT %s", payload)
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -167,6 +229,18 @@ async def handle_service_message(update: Update, context: ContextTypes.DEFAULT_T
                     )
                     logger.info(f"已移除黑名单用户名用户 - {display_name} (ID: {member.id})")
 
+                    log_ban_event(
+                        category="username_blacklist",
+                        chat=message.chat,
+                        user=member,
+                        reason=username_blacklist_reason,
+                        confidence=1.0,
+                        extra={
+                            "trigger": "new_member",
+                            "matched_username": telegram_username or None,
+                        },
+                    )
+
                     notification_lines = [
                         "🚫 检测到黑名单用户名并已移除",
                         f"👤 用户: {display_name}",
@@ -204,6 +278,19 @@ async def handle_service_message(update: Update, context: ContextTypes.DEFAULT_T
                         user_id=member.id
                     )
                     logger.info(f"已移除黑名单显示名称用户 - {display_name} (ID: {member.id})")
+
+                    log_ban_event(
+                        category="display_name_blacklist",
+                        chat=message.chat,
+                        user=member,
+                        reason=display_name_blacklist_reason,
+                        confidence=1.0,
+                        extra={
+                            "trigger": "new_member",
+                            "matched_display_name": display_name,
+                            "matched_username": telegram_username or None,
+                        },
+                    )
 
                     notification_lines = [
                         "🚫 检测到黑名单显示名称并已移除",
@@ -253,6 +340,19 @@ async def handle_service_message(update: Update, context: ContextTypes.DEFAULT_T
                         user_id=member.id
                     )
                     logger.info(f"已移除违规用户名用户 - {display_name} (ID: {member.id})")
+
+                    log_ban_event(
+                        category="username_llm_violation",
+                        chat=message.chat,
+                        user=member,
+                        reason=username_result["reason"],
+                        confidence=username_result["confidence"],
+                        extra={
+                            "trigger": "new_member",
+                            "matched_username": telegram_username or None,
+                            "analysis_category": username_result.get("category"),
+                        },
+                    )
                     
                     notification_lines = [
                         "🚫 检测到违规用户名并已移除",
@@ -495,6 +595,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     user.username or user.first_name,
                     user.id
                 )
+
+                log_ban_event(
+                    category=result.get("category") or "message_violation",
+                    chat=chat,
+                    user=user,
+                    reason=result["reason"],
+                    confidence=result["confidence"],
+                    extra={
+                        "trigger": "message",
+                        "message_id": message.message_id,
+                        "risk_flags": risk_indicators.get("risk_flags", []),
+                        "risk_score": risk_indicators.get("risk_score"),
+                    },
+                )
                 
                 # 删除垃圾消息
                 await message.delete()
@@ -583,6 +697,23 @@ def _format_ban_report(stats: Dict[str, Any]) -> Optional[str]:
         f"👤 唯一账号: {unique_accounts} 个",
     ]
 
+    category_summary_blocks = []
+    category_stats = stats.get("by_category") or {}
+    if category_stats:
+        sorted_categories = sorted(
+            category_stats.items(),
+            key=lambda item: item[1].get("total", 0),
+            reverse=True
+        )
+        summary_lines = ["📌 封禁原因统计:"]
+        for category, cat_stats in sorted_categories:
+            label = describe_ban_category(category)
+            summary_lines.append(
+                f"- {label}: {cat_stats.get('total', 0)} 条，"
+                f"{cat_stats.get('unique_accounts', 0)} 个账号"
+            )
+        category_summary_blocks.append("\n".join(summary_lines))
+
     sections = []
     if stats_by_chat:
         for chat_id in sorted(stats_by_chat.keys()):
@@ -597,25 +728,39 @@ def _format_ban_report(stats: Dict[str, Any]) -> Optional[str]:
                 f"封禁记录: {chat_total} 条 | 唯一账号: {chat_unique} 个",
             ]
 
+            chat_category = chat_stats.get("by_category") or {}
+            if chat_category:
+                breakdown = ", ".join(
+                    f"{describe_ban_category(cat)}×{count}"
+                    for cat, count in sorted(
+                        chat_category.items(), key=lambda item: item[1], reverse=True
+                    )
+                )
+                section_lines.append(f"封禁原因: {breakdown}")
+
             if entries:
                 section_lines.append("最近记录（最多展示 5 条）:")
                 for entry in entries[-5:]:
                     timestamp = entry.get("timestamp")
-                    username = entry.get("username", "未知用户")
-                    user_id = entry.get("user_id", "未知 ID")
-                    if timestamp:
-                        time_str = timestamp.strftime('%m-%d %H:%M')
-                    else:
-                        time_str = "未知时间"
-                    section_lines.append(
-                        f"- {time_str} | {username} (ID: {user_id})"
-                    )
+                    username = entry.get("username") or "未知用户"
+                    user_id = entry.get("user_id") or "未知 ID"
+                    time_str = timestamp.strftime('%m-%d %H:%M') if timestamp else "未知时间"
+                    category_label = describe_ban_category(entry.get("category"))
+                    line = f"- {time_str} | {username} (ID: {user_id}) | {category_label}"
+                    reason = entry.get("reason")
+                    if reason:
+                        reason_text = str(reason)
+                        if len(reason_text) > 60:
+                            reason_text = reason_text[:57] + "…"
+                        line += f" | 理由: {reason_text}"
+                    section_lines.append(line)
 
             sections.append("\n".join(section_lines))
     else:
         sections.append("⚠️ 最近的封禁记录缺少群组信息，请检查日志格式。")
 
     report_parts = ["\n".join(header_lines)]
+    report_parts.extend(category_summary_blocks)
     report_parts.extend(sections)
     return "\n\n".join(report_parts)
 
