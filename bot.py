@@ -562,65 +562,68 @@ async def delete_notification(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def send_daily_ban_report(context: ContextTypes.DEFAULT_TYPE):
-    """每日封禁统计报告，在群内发送并于 3 秒后删除。"""
+    """每日封禁统计报告，发送给管理员用户并保留消息。"""
     stats = get_recent_ban_stats(window_hours=24)
     stats_by_chat = stats.get("by_chat", {})
     since = stats["since"]
     until = stats["until"]
+    total = stats.get("total", 0)
+    unique_accounts = stats.get("unique_accounts", 0)
 
-    target_chat_ids = set(config.REPORT_CHAT_IDS) if config.REPORT_CHAT_IDS else set(stats_by_chat.keys())
-
-    if not target_chat_ids:
+    if total == 0:
         logger.debug("最近 24 小时没有封禁记录，跳过封禁统计报告发送")
         return
 
-    for chat_id in sorted(target_chat_ids):
-        chat_stats = stats_by_chat.get(chat_id, {
-            "chat_title": None,
-            "total": 0,
-            "unique_accounts": 0,
-            "entries": []
-        })
-        chat_title = chat_stats.get("chat_title") or str(chat_id)
-        total = chat_stats.get("total", 0)
-        unique_accounts = chat_stats.get("unique_accounts", 0)
-        entries = chat_stats.get("entries", [])
+    target_user_ids = sorted(set(config.ADMIN_USER_IDS))
+    if not target_user_ids:
+        logger.warning("未配置管理员用户 ID，封禁统计报告无法发送")
+        return
 
-        report_lines = [
-            "📊 垃圾账号封禁统计",
-            f"👥 群组: {chat_title}",
-            f"🕘 统计范围: {since.strftime('%Y-%m-%d %H:%M')} - {until.strftime('%Y-%m-%d %H:%M')} (北京时间)",
-            f"🚫 封禁记录: {total} 条",
-            f"👤 唯一账号: {unique_accounts} 个",
-        ]
+    header_lines = [
+        "📊 垃圾账号封禁统计",
+        f"🕘 统计范围: {since.strftime('%Y-%m-%d %H:%M')} - {until.strftime('%Y-%m-%d %H:%M')} (北京时间)",
+        f"🚫 封禁记录: {total} 条",
+        f"👤 唯一账号: {unique_accounts} 个",
+    ]
 
-        if entries:
-            report_lines.append("🗒️ 最近记录（最多展示 5 条）:")
-            for entry in entries[-5:]:
-                report_lines.append(
-                    f"- {entry['timestamp'].strftime('%m-%d %H:%M')} | "
-                    f"{entry['username']} (ID: {entry['user_id']})"
-                )
-        else:
-            report_lines.append("✅ 最近 24 小时未封禁新的垃圾账号。")
+    sections = []
+    if stats_by_chat:
+        for chat_id in sorted(stats_by_chat.keys()):
+            chat_stats = stats_by_chat[chat_id]
+            chat_title = chat_stats.get("chat_title") or str(chat_id)
+            chat_total = chat_stats.get("total", 0)
+            chat_unique = chat_stats.get("unique_accounts", 0)
+            entries = chat_stats.get("entries", [])
 
+            section_lines = [
+                f"—— {chat_title} ({chat_id}) ——",
+                f"封禁记录: {chat_total} 条 | 唯一账号: {chat_unique} 个",
+            ]
+
+            if entries:
+                section_lines.append("最近记录（最多展示 5 条）:")
+                for entry in entries[-5:]:
+                    section_lines.append(
+                        f"- {entry['timestamp'].strftime('%m-%d %H:%M')} | "
+                        f"{entry['username']} (ID: {entry['user_id']})"
+                    )
+
+            sections.append("\n".join(section_lines))
+    else:
+        sections.append("⚠️ 最近的封禁记录缺少群组信息，请检查日志格式。")
+
+    report_parts = ["\n".join(header_lines)]
+    report_parts.extend(sections)
+    report_text = "\n\n".join(report_parts)
+
+    for user_id in target_user_ids:
         try:
-            notification = await context.bot.send_message(
-                chat_id=chat_id,
-                text="\n".join(report_lines)
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=report_text
             )
-
-            if context.application.job_queue:
-                context.application.job_queue.run_once(
-                    delete_notification,
-                    when=3,
-                    data={
-                        'chat_id': chat_id,
-                        'message_id': notification.message_id
-                    }
-                )
         except TelegramError as exc:
-            logger.error(f"发送封禁统计报告失败 (chat_id={chat_id}): {exc}")
+            logger.error(f"发送封禁统计报告失败 (user_id={user_id}): {exc}")
 
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
