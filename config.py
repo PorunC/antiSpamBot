@@ -60,6 +60,21 @@ SYSTEM_USER_IDS = [777000, 1087968824]
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 LOG_FILE = os.getenv("LOG_FILE", "logs/bot.log")
 
+# 封禁统计报告配置（可配置多个群聊，逗号分隔）
+REPORT_CHAT_IDS_STR = os.getenv("REPORT_CHAT_IDS", "").strip()
+REPORT_CHAT_IDS = []
+if REPORT_CHAT_IDS_STR:
+    for raw_chat_id in REPORT_CHAT_IDS_STR.split(","):
+        chat_id_str = raw_chat_id.strip()
+        if not chat_id_str:
+            continue
+        try:
+            REPORT_CHAT_IDS.append(int(chat_id_str))
+        except ValueError as exc:
+            raise ValueError(
+                f"REPORT_CHAT_IDS 中的项必须为整数，当前值: {chat_id_str}"
+            ) from exc
+
 # LLM 提示词模板
 SPAM_DETECTION_PROMPT = """你是一个专业的垃圾消息检测助手。请分析以下消息内容，判断它是否为垃圾消息、广告或恶意内容。
 
@@ -221,7 +236,7 @@ def validate_config():
     
     if not LLM_API_KEY:
         errors.append("未设置 LLM_API_KEY")
-    
+
     if errors:
         raise ValueError(f"配置错误:\n" + "\n".join(f"- {err}" for err in errors))
     

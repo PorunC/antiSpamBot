@@ -5,6 +5,7 @@ import re
 import logging
 import sys
 import asyncio
+from datetime import time
 from pathlib import Path
 from typing import Optional
 from telegram import Update
@@ -19,6 +20,7 @@ from telegram.error import TelegramError
 import config
 from llm_api import llm_client
 from spam_detector import spam_detector
+from log_analyzer import get_recent_ban_stats, BEIJING_TZ
 
 # 配置日志
 log_handlers = [logging.StreamHandler(sys.stdout)]
@@ -298,14 +300,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     处理群组消息
     """
-    message = update.message
+    message = update.effective_message
+    
+    if not message:
+        logger.debug("跳过无消息内容的更新: %s", update)
+        return
+    
+    chat = getattr(message, "chat", None)
+    if not chat:
+        logger.debug("跳过无法确定聊天来源的消息: %s", message)
+        return
     
     # 只处理群组消息
-    if message.chat.type not in ['group', 'supergroup']:
+    if chat.type not in ['group', 'supergroup']:
         return
     
     try:
-        chat = message.chat
         sender = message.from_user or message.sender_chat
         sender_name = (
             getattr(sender, "username", None)
@@ -473,11 +483,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             try:
                 # 封禁用户（先封禁再删除消息，这样可以捕获封禁产生的系统消息）
-                ban_result = await context.bot.ban_chat_member(
+                await context.bot.ban_chat_member(
                     chat_id=message.chat_id,
                     user_id=user.id
                 )
-                logger.info(f"已封禁用户 - {user.username or user.first_name} (ID: {user.id})")
+                chat = message.chat
+                logger.info(
+                    "已封禁用户 - 群组: %s (%s) - %s (ID: %s)",
+                    chat.title or chat.id,
+                    chat.id,
+                    user.username or user.first_name,
+                    user.id
+                )
                 
                 # 删除垃圾消息
                 await message.delete()
@@ -544,6 +561,68 @@ async def delete_notification(context: ContextTypes.DEFAULT_TYPE):
         logger.warning(f"删除通知消息失败: {e}")
 
 
+async def send_daily_ban_report(context: ContextTypes.DEFAULT_TYPE):
+    """每日封禁统计报告，在群内发送并于 3 秒后删除。"""
+    stats = get_recent_ban_stats(window_hours=24)
+    stats_by_chat = stats.get("by_chat", {})
+    since = stats["since"]
+    until = stats["until"]
+
+    target_chat_ids = set(config.REPORT_CHAT_IDS) if config.REPORT_CHAT_IDS else set(stats_by_chat.keys())
+
+    if not target_chat_ids:
+        logger.debug("最近 24 小时没有封禁记录，跳过封禁统计报告发送")
+        return
+
+    for chat_id in sorted(target_chat_ids):
+        chat_stats = stats_by_chat.get(chat_id, {
+            "chat_title": None,
+            "total": 0,
+            "unique_accounts": 0,
+            "entries": []
+        })
+        chat_title = chat_stats.get("chat_title") or str(chat_id)
+        total = chat_stats.get("total", 0)
+        unique_accounts = chat_stats.get("unique_accounts", 0)
+        entries = chat_stats.get("entries", [])
+
+        report_lines = [
+            "📊 垃圾账号封禁统计",
+            f"👥 群组: {chat_title}",
+            f"🕘 统计范围: {since.strftime('%Y-%m-%d %H:%M')} - {until.strftime('%Y-%m-%d %H:%M')} (北京时间)",
+            f"🚫 封禁记录: {total} 条",
+            f"👤 唯一账号: {unique_accounts} 个",
+        ]
+
+        if entries:
+            report_lines.append("🗒️ 最近记录（最多展示 5 条）:")
+            for entry in entries[-5:]:
+                report_lines.append(
+                    f"- {entry['timestamp'].strftime('%m-%d %H:%M')} | "
+                    f"{entry['username']} (ID: {entry['user_id']})"
+                )
+        else:
+            report_lines.append("✅ 最近 24 小时未封禁新的垃圾账号。")
+
+        try:
+            notification = await context.bot.send_message(
+                chat_id=chat_id,
+                text="\n".join(report_lines)
+            )
+
+            if context.application.job_queue:
+                context.application.job_queue.run_once(
+                    delete_notification,
+                    when=3,
+                    data={
+                        'chat_id': chat_id,
+                        'message_id': notification.message_id
+                    }
+                )
+        except TelegramError as exc:
+            logger.error(f"发送封禁统计报告失败 (chat_id={chat_id}): {exc}")
+
+
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理错误"""
     logger.error(f"更新 {update} 导致错误: {context.error}", exc_info=context.error)
@@ -597,6 +676,17 @@ def main():
         
         # 添加错误处理器
         application.add_error_handler(error_handler)
+
+        # 安排每日封禁统计任务
+        if application.job_queue:
+            report_time = time(hour=23, minute=0, tzinfo=BEIJING_TZ)
+            application.job_queue.run_daily(
+                send_daily_ban_report,
+                time=report_time,
+                name="daily_ban_report"
+            )
+        else:
+            logger.warning("JobQueue 未配置，封禁统计报告任务无法安排")
         
         # 启动机器人
         logger.info("✅ 机器人启动成功！正在监听消息...")
