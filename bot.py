@@ -57,8 +57,11 @@ CATEGORY_LABELS = {
     "legacy_message_violation": "垃圾消息",
     "spam": "垃圾消息",
     "ad": "广告消息",
+    "advertisement": "广告消息",
     "promotion": "引流推广消息",
     "scam": "诈骗/钓鱼消息",
+    "channel_spam": "频道垃圾消息",
+    "inappropriate": "违规内容",
     "other": "其他违规消息",
 }
 
