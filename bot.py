@@ -732,46 +732,8 @@ def _format_ban_report(stats: Dict[str, Any]) -> Optional[str]:
             )
         category_summary_blocks.append("\n".join(summary_lines))
 
-    sections = []
-    if stats_by_chat:
-        for chat_id in sorted(stats_by_chat.keys()):
-            chat_stats = stats_by_chat[chat_id]
-            chat_title = chat_stats.get("chat_title") or str(chat_id)
-            chat_total = chat_stats.get("total", 0)
-            chat_unique = chat_stats.get("unique_accounts", 0)
-            entries = chat_stats.get("entries", [])
-
-            section_lines = [
-                f"—— {chat_title} ({chat_id}) ——",
-                f"封禁记录: {chat_total} 条 | 唯一账号: {chat_unique} 个",
-            ]
-
-            chat_category = chat_stats.get("by_category") or {}
-            if chat_category:
-                breakdown = ", ".join(
-                    f"{describe_ban_category(cat)}×{count}"
-                    for cat, count in sorted(
-                        chat_category.items(), key=lambda item: item[1], reverse=True
-                    )
-                )
-                section_lines.append(f"封禁原因: {breakdown}")
-
-            if entries:
-                section_lines.append("最近记录（最多展示 5 条）:")
-                for entry in entries[-5:]:
-                    timestamp = entry.get("timestamp")
-                    username = entry.get("username") or "未知用户"
-                    time_str = timestamp.strftime("%m-%d %H:%M") if timestamp else "未知时间"
-                    category_label = describe_ban_category(entry.get("category"))
-                    section_lines.append(f"- {time_str} | {username} | {category_label}")
-
-            sections.append("\n".join(section_lines))
-    else:
-        sections.append("⚠️ 最近的封禁记录缺少群组信息，请检查日志格式。")
-
     report_parts = ["\n".join(header_lines)]
     report_parts.extend(category_summary_blocks)
-    report_parts.extend(sections)
     return "\n\n".join(report_parts)
 
 
