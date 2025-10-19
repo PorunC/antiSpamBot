@@ -63,6 +63,7 @@ CATEGORY_LABELS = {
     "channel_spam": "频道垃圾消息",
     "inappropriate": "违规内容",
     "other": "其他违规消息",
+    "marketing": "营销消息",
 }
 
 
