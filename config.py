@@ -24,6 +24,10 @@ CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", "0.7"))
 USERNAME_CONFIDENCE_THRESHOLD = float(os.getenv("USERNAME_CONFIDENCE_THRESHOLD", "0.75"))
 USERNAME_BLACKLIST_PATTERNS = [
     {
+        "pattern": r"^ATadj[a-z0-9]{4,}$",
+        "reason": "用户名匹配黑名单特征：ATadj + 随机字符"
+    },
+    {
         "pattern": r"^toom[a-z0-9]{4,}$",
         "reason": "用户名匹配黑名单特征：TOOM + 随机字符"
     },
